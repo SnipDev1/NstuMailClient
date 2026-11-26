@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -40,8 +41,10 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.MarkEmailRead
+import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Outbox
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PriorityHigh
@@ -72,17 +75,22 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -100,7 +108,10 @@ import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.PersonProfile
+import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.extractSubjectTags
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,6 +120,11 @@ fun MailListScreen(
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
+    mutedFolderIds: Set<String>,
+    tagSortRules: List<TagSortRule>,
+    availableTags: List<String>,
+    swipeRightAction: SwipeAction,
+    swipeLeftAction: SwipeAction,
     onRequestAvatar: (String) -> Unit,
     onSelectFolder: (MailFolder) -> Unit,
     onSelectFilter: (MailFilter) -> Unit,
@@ -120,6 +136,13 @@ fun MailListScreen(
     onToggleSelect: (String) -> Unit,
     onClearSelection: () -> Unit,
     onToggleFlag: (EmailSummary) -> Unit,
+    onToggleReadSummary: (EmailSummary) -> Unit,
+    onDeleteSummary: (EmailSummary) -> Unit,
+    onMoveSummary: (EmailSummary, MailFolder) -> Unit,
+    onToggleSpamSummary: (EmailSummary) -> Unit,
+    onToggleFolderNotifications: (MailFolder) -> Unit,
+    onSaveTagSortRule: (tag: String, folder: MailFolder) -> Unit,
+    onRemoveTagSortRule: (tag: String) -> Unit,
     onBatchSetRead: (Boolean) -> Unit,
     onBatchMove: (MailFolder) -> Unit,
     onBatchDelete: () -> Unit,
@@ -147,6 +170,14 @@ fun MailListScreen(
     var renameTarget by remember { mutableStateOf<MailFolder?>(null) }
     var deleteFolderTarget by remember { mutableStateOf<MailFolder?>(null) }
     var confirmEmptyFolder by remember { mutableStateOf(false) }
+    var moveSingleTarget by remember { mutableStateOf<EmailSummary?>(null) }
+    var quickRuleFolder by remember { mutableStateOf<MailFolder?>(null) }
+    var showRulesDialog by remember { mutableStateOf(false) }
+
+    fun isFolderMuted(f: MailFolder?): Boolean {
+        if (f == null) return false
+        return f.id in mutedFolderIds || (f.systemKind == SystemFolderKind.INBOX && "inbox" in mutedFolderIds)
+    }
 
     val selectionMode = state.selectedIds.isNotEmpty()
     BackHandler(enabled = selectionMode, onBack = onClearSelection)
@@ -166,6 +197,43 @@ fun MailListScreen(
                 showMovePicker = false
                 onBatchMove(target)
             }
+        )
+    }
+
+    moveSingleTarget?.let { msg ->
+        FolderPickerDialog(
+            folders = state.folders,
+            excludeFolderId = state.currentFolder?.id,
+            onDismiss = { moveSingleTarget = null },
+            onSelect = { target ->
+                moveSingleTarget = null
+                onMoveSummary(msg, target)
+            }
+        )
+    }
+
+    quickRuleFolder?.let { targetFolder ->
+        AddTagRuleDialog(
+            folders = state.folders,
+            availableTags = availableTags,
+            fixedFolder = targetFolder,
+            onDismiss = { quickRuleFolder = null },
+            onConfirm = { tag, chosen ->
+                quickRuleFolder = null
+                onSaveTagSortRule(tag, chosen)
+            }
+        )
+    }
+
+    if (showRulesDialog) {
+        TagSortRulesDialog(
+            folders = state.folders,
+            rules = tagSortRules,
+            availableTags = availableTags,
+            mutedFolderIds = mutedFolderIds,
+            onSaveRule = onSaveTagSortRule,
+            onRemoveRule = onRemoveTagSortRule,
+            onDismiss = { showRulesDialog = false }
         )
     }
 
@@ -288,9 +356,18 @@ fun MailListScreen(
                         DrawerFolderItem(
                             folder = folder,
                             selected = state.currentFolder?.id == folder.id,
+                            notificationsMuted = isFolderMuted(folder),
                             onSelect = {
                                 scope.launch { drawerState.close() }
                                 onSelectFolder(folder)
+                            },
+                            onToggleNotifications = {
+                                scope.launch { drawerState.close() }
+                                onToggleFolderNotifications(folder)
+                            },
+                            onSetupAutoSort = {
+                                scope.launch { drawerState.close() }
+                                quickRuleFolder = folder
                             },
                             onCreateSubfolder = {
                                 scope.launch { drawerState.close() }
@@ -341,9 +418,18 @@ fun MailListScreen(
                             DrawerFolderItem(
                                 folder = folder,
                                 selected = state.currentFolder?.id == folder.id,
+                                notificationsMuted = isFolderMuted(folder),
                                 onSelect = {
                                     scope.launch { drawerState.close() }
                                     onSelectFolder(folder)
+                                },
+                                onToggleNotifications = {
+                                    scope.launch { drawerState.close() }
+                                    onToggleFolderNotifications(folder)
+                                },
+                                onSetupAutoSort = {
+                                    scope.launch { drawerState.close() }
+                                    quickRuleFolder = folder
                                 },
                                 onCreateSubfolder = {
                                     scope.launch { drawerState.close() }
@@ -499,6 +585,28 @@ fun MailListScreen(
                                         expanded = folderMenuExpanded,
                                         onDismissRequest = { folderMenuExpanded = false }
                                     ) {
+                                        state.currentFolder?.let { curFolder ->
+                                            val muted = isFolderMuted(curFolder)
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        if (muted) "Уведомления папки: выкл (вкл.)"
+                                                        else "Уведомления папки: вкл (выкл.)"
+                                                    )
+                                                },
+                                                onClick = {
+                                                    folderMenuExpanded = false
+                                                    onToggleFolderNotifications(curFolder)
+                                                }
+                                            )
+                                        }
+                                        DropdownMenuItem(
+                                            text = { Text("Автосортировка по тегам") },
+                                            onClick = {
+                                                folderMenuExpanded = false
+                                                showRulesDialog = true
+                                            }
+                                        )
                                         DropdownMenuItem(
                                             text = { Text("Отметить все прочитанными") },
                                             onClick = {
@@ -620,16 +728,29 @@ fun MailListScreen(
                                     profile = personProfiles[senderKey],
                                     knownNames = knownNames
                                 )
-                                EmailRow(
+                                SwipeableEmailRow(
                                     item = item,
                                     displaySenderName = resolvedSenderName,
                                     photo = avatars[senderKey],
                                     selected = item.id in state.selectedIds,
+                                    selectionMode = selectionMode,
+                                    swipeRightAction = swipeRightAction,
+                                    swipeLeftAction = swipeLeftAction,
                                     onRequestAvatar = onRequestAvatar,
                                     onClick = { onOpenMessage(item) },
                                     onLongClick = { onToggleSelect(item.id) },
                                     onAvatarClick = { onToggleSelect(item.id) },
-                                    onToggleFlag = { onToggleFlag(item) }
+                                    onToggleFlag = { onToggleFlag(item) },
+                                    onExecuteSwipeAction = { action, msg ->
+                                        when (action) {
+                                            SwipeAction.NONE -> Unit
+                                            SwipeAction.TOGGLE_READ -> onToggleReadSummary(msg)
+                                            SwipeAction.DELETE -> onDeleteSummary(msg)
+                                            SwipeAction.TOGGLE_FLAG -> onToggleFlag(msg)
+                                            SwipeAction.MOVE -> moveSingleTarget = msg
+                                            SwipeAction.SPAM -> onToggleSpamSummary(msg)
+                                        }
+                                    }
                                 )
                                 HorizontalDivider(
                                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
@@ -664,7 +785,10 @@ fun MailListScreen(
 private fun DrawerFolderItem(
     folder: MailFolder,
     selected: Boolean,
+    notificationsMuted: Boolean,
     onSelect: () -> Unit,
+    onToggleNotifications: () -> Unit,
+    onSetupAutoSort: () -> Unit,
     onCreateSubfolder: () -> Unit,
     onRename: (() -> Unit)?,
     onDelete: (() -> Unit)?
@@ -682,41 +806,62 @@ private fun DrawerFolderItem(
         },
         badge = {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (notificationsMuted) {
+                    Icon(
+                        imageVector = Icons.Default.NotificationsOff,
+                        contentDescription = "Уведомления выключены",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .size(14.dp)
+                    )
+                }
                 if (folder.unreadCount > 0) {
                     Text(folder.unreadCount.toString())
                 }
-                if (onRename != null || onDelete != null) {
-                    Box {
-                        IconButton(
-                            onClick = { menuOpen = true },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.MoreVert,
-                                contentDescription = "Опции папки",
-                                modifier = Modifier.size(16.dp)
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "Опции папки",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (notificationsMuted) "Уведомления: выкл (вкл.)"
+                                    else "Уведомления: вкл (выкл.)"
+                                )
+                            },
+                            onClick = { menuOpen = false; onToggleNotifications() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Автосортировка по тегу…") },
+                            onClick = { menuOpen = false; onSetupAutoSort() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Создать подпапку") },
+                            onClick = { menuOpen = false; onCreateSubfolder() }
+                        )
+                        if (onRename != null) {
+                            DropdownMenuItem(
+                                text = { Text("Переименовать") },
+                                onClick = { menuOpen = false; onRename() }
                             )
                         }
-                        DropdownMenu(
-                            expanded = menuOpen,
-                            onDismissRequest = { menuOpen = false }
-                        ) {
+                        if (onDelete != null) {
                             DropdownMenuItem(
-                                text = { Text("Создать подпапку") },
-                                onClick = { menuOpen = false; onCreateSubfolder() }
+                                text = { Text("Удалить") },
+                                onClick = { menuOpen = false; onDelete() }
                             )
-                            if (onRename != null) {
-                                DropdownMenuItem(
-                                    text = { Text("Переименовать") },
-                                    onClick = { menuOpen = false; onRename() }
-                                )
-                            }
-                            if (onDelete != null) {
-                                DropdownMenuItem(
-                                    text = { Text("Удалить") },
-                                    onClick = { menuOpen = false; onDelete() }
-                                )
-                            }
                         }
                     }
                 }
@@ -727,6 +872,131 @@ private fun DrawerFolderItem(
         onClick = onSelect,
         modifier = Modifier.padding(start = indentDp, end = 12.dp)
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeableEmailRow(
+    item: EmailSummary,
+    displaySenderName: String,
+    photo: ImageBitmap?,
+    selected: Boolean,
+    selectionMode: Boolean,
+    swipeRightAction: SwipeAction,
+    swipeLeftAction: SwipeAction,
+    onRequestAvatar: (String) -> Unit,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onAvatarClick: () -> Unit,
+    onToggleFlag: () -> Unit,
+    onExecuteSwipeAction: (SwipeAction, EmailSummary) -> Unit
+) {
+    val currentItem by rememberUpdatedState(item)
+    val currentRight by rememberUpdatedState(swipeRightAction)
+    val currentLeft by rememberUpdatedState(swipeLeftAction)
+
+    if (selectionMode || (swipeRightAction == SwipeAction.NONE && swipeLeftAction == SwipeAction.NONE)) {
+        EmailRow(
+            item = item,
+            displaySenderName = displaySenderName,
+            photo = photo,
+            selected = selected,
+            onRequestAvatar = onRequestAvatar,
+            onClick = onClick,
+            onLongClick = onLongClick,
+            onAvatarClick = onAvatarClick,
+            onToggleFlag = onToggleFlag
+        )
+        return
+    }
+
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    if (currentRight != SwipeAction.NONE) {
+                        onExecuteSwipeAction(currentRight, currentItem)
+                    }
+                    false
+                }
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (currentLeft != SwipeAction.NONE) {
+                        onExecuteSwipeAction(currentLeft, currentItem)
+                    }
+                    false
+                }
+                SwipeToDismissBoxValue.Settled -> false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = swipeRightAction != SwipeAction.NONE,
+        enableDismissFromEndToStart = swipeLeftAction != SwipeAction.NONE,
+        backgroundContent = {
+            val dir = dismissState.dismissDirection
+            val action = when (dir) {
+                SwipeToDismissBoxValue.StartToEnd -> swipeRightAction
+                SwipeToDismissBoxValue.EndToStart -> swipeLeftAction
+                SwipeToDismissBoxValue.Settled -> SwipeAction.NONE
+            }
+            val bgColor = when (action) {
+                SwipeAction.DELETE, SwipeAction.SPAM -> MaterialTheme.colorScheme.errorContainer
+                SwipeAction.TOGGLE_READ, SwipeAction.TOGGLE_FLAG, SwipeAction.MOVE ->
+                    MaterialTheme.colorScheme.primaryContainer
+                SwipeAction.NONE -> MaterialTheme.colorScheme.surface
+            }
+            val fgColor = when (action) {
+                SwipeAction.DELETE, SwipeAction.SPAM -> MaterialTheme.colorScheme.onErrorContainer
+                SwipeAction.TOGGLE_READ, SwipeAction.TOGGLE_FLAG, SwipeAction.MOVE ->
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                SwipeAction.NONE -> MaterialTheme.colorScheme.onSurface
+            }
+            val icon = when (action) {
+                SwipeAction.DELETE -> Icons.Default.Delete
+                SwipeAction.SPAM -> Icons.Default.Report
+                SwipeAction.TOGGLE_READ ->
+                    if (item.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead
+                SwipeAction.TOGGLE_FLAG ->
+                    if (item.isFlagged) Icons.Default.StarBorder else Icons.Default.Star
+                SwipeAction.MOVE -> Icons.AutoMirrored.Filled.DriveFileMove
+                SwipeAction.NONE -> null
+            }
+            val align = if (dir == SwipeToDismissBoxValue.StartToEnd) {
+                Alignment.CenterStart
+            } else {
+                Alignment.CenterEnd
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(bgColor)
+                    .padding(horizontal = 20.dp),
+                contentAlignment = align
+            ) {
+                if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = action.labelRu,
+                        tint = fgColor
+                    )
+                }
+            }
+        }
+    ) {
+        EmailRow(
+            item = item,
+            displaySenderName = displaySenderName,
+            photo = photo,
+            selected = selected,
+            onRequestAvatar = onRequestAvatar,
+            onClick = onClick,
+            onLongClick = onLongClick,
+            onAvatarClick = onAvatarClick,
+            onToggleFlag = onToggleFlag
+        )
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -831,8 +1101,33 @@ private fun EmailRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
+                    val (tags, cleanSubject) = remember(item.subject) {
+                        extractSubjectTags(item.subject)
+                    }
+                    if (tags.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            tags.take(3).forEach { tag ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = tag,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                     Text(
-                        text = item.subject,
+                        text = cleanSubject.ifBlank { item.subject },
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = weight,
                         maxLines = 1,
@@ -943,6 +1238,211 @@ private fun FolderNameDialog(
                 onClick = { onConfirm(name) },
                 enabled = name.isNotBlank()
             ) { Text(confirmLabel) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        }
+    )
+}
+
+@Composable
+private fun TagSortRulesDialog(
+    folders: List<MailFolder>,
+    rules: List<TagSortRule>,
+    availableTags: List<String>,
+    mutedFolderIds: Set<String>,
+    onSaveRule: (tag: String, folder: MailFolder) -> Unit,
+    onRemoveRule: (tag: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var showAdd by remember { mutableStateOf(false) }
+
+    if (showAdd) {
+        AddTagRuleDialog(
+            folders = folders,
+            availableTags = availableTags,
+            fixedFolder = null,
+            onDismiss = { showAdd = false },
+            onConfirm = { tag, folder ->
+                showAdd = false
+                onSaveRule(tag, folder)
+            }
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Автосортировка по тегам") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (rules.isEmpty()) {
+                    Text(
+                        text = "Правил пока нет. Письма с тегом (например [ПЗ]) будут автоматически перемещаться в выбранную папку.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    rules.forEach { rule ->
+                        val muted = rule.targetFolderId in mutedFolderIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "[${rule.tag}] → ${rule.targetFolderName}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = if (muted) "Уведомления в папке выкл." else "Уведомления в папке вкл.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(
+                                onClick = { onRemoveRule(rule.tag) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Удалить правило",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { showAdd = true }) { Text("+ Добавить") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        }
+    )
+}
+
+@Composable
+internal fun AddTagRuleDialog(
+    folders: List<MailFolder>,
+    availableTags: List<String>,
+    fixedFolder: MailFolder?,
+    onDismiss: () -> Unit,
+    onConfirm: (tag: String, targetFolder: MailFolder) -> Unit
+) {
+    val allTags = remember(availableTags) {
+        (ru.nstu.mail.data.DEFAULT_TAGS + availableTags).distinctBy { it.lowercase() }
+    }
+    var tagText by remember { mutableStateOf(allTags.firstOrNull().orEmpty()) }
+    var selectedFolder by remember {
+        mutableStateOf(
+            fixedFolder
+                ?: folders.firstOrNull { !it.isSystem }
+                ?: folders.firstOrNull { it.systemKind != SystemFolderKind.INBOX }
+                ?: folders.firstOrNull()
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (fixedFolder != null) "Автосортировка в «${fixedFolder.displayName}»"
+                else "Новое правило автосортировки"
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 380.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                OutlinedTextField(
+                    value = tagText,
+                    onValueChange = { tagText = it.take(24) },
+                    label = { Text("Тег (напр. ПЗ)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    allTags.forEach { t ->
+                        FilterChip(
+                            selected = tagText.equals(t, ignoreCase = true),
+                            onClick = { tagText = t },
+                            label = { Text(t) }
+                        )
+                    }
+                }
+                if (fixedFolder == null) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Целевая папка:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    folders.forEach { f ->
+                        val picked = selectedFolder?.id == f.id
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedFolder = f }
+                                .padding(
+                                    start = (4 + f.depth * 14).dp,
+                                    top = 6.dp,
+                                    bottom = 6.dp
+                                ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (picked) Icons.Default.CheckCircle else folderIcon(f),
+                                contentDescription = null,
+                                tint = if (picked) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = f.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (picked) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val target = fixedFolder ?: selectedFolder ?: return@TextButton
+                    onConfirm(tagText.trim(), target)
+                },
+                enabled = tagText.isNotBlank() && (fixedFolder != null || selectedFolder != null)
+            ) {
+                Text("Сохранить")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Отмена") }

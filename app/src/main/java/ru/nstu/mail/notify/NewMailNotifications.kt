@@ -46,6 +46,9 @@ import ru.nstu.mail.data.CredentialStore
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
+import ru.nstu.mail.data.MailRulesStore
+import ru.nstu.mail.data.matchAutoSortRule
+import ru.nstu.mail.data.shouldNotifyForMessage
 import java.util.concurrent.TimeUnit
 
 const val EXTRA_MESSAGE_ID = "extra_message_id"
@@ -369,6 +372,7 @@ object MailNotificationHelper {
         stopPushService(context)
         cancelPeriodicCheck(context)
         cancelNotifications(context)
+        MailRulesStore.clearAccountRulesOnLogout(context)
         prefs(context).edit()
             .remove(KEY_SEEN_IDS)
             .remove(KEY_BASELINE_READY)
@@ -379,9 +383,45 @@ object MailNotificationHelper {
         val unread = client.listInboxUnread(pageSize = 15)
         val existing = getSeenIds(context)
         val baselineReady = isBaselineReady(context)
-        val toNotify = selectNewMessagesToNotify(unread, existing.toSet(), baselineReady)
+        val toProcess = selectNewMessagesToNotify(unread, existing.toSet(), baselineReady)
         val merged = mergeSeenMessageIds(existing, unread.map { it.id })
         saveSeenIds(context, merged)
+        if (toProcess.isEmpty()) return
+
+        val rules = MailRulesStore.getTagSortRules(context)
+        val mutedFolders = MailRulesStore.getMutedFolderIds(context)
+        val mutedSenders = MailRulesStore.getMutedSenders(context)
+        val savedInboxId = MailRulesStore.getInboxFolderId(context)
+
+        val toNotify = mutableListOf<EmailSummary>()
+        for (msg in toProcess) {
+            val matchedRule = matchAutoSortRule(msg.subject, rules)
+            var effectiveFolderId = savedInboxId
+            var inInbox = true
+            if (matchedRule != null &&
+                matchedRule.targetFolderId.isNotBlank() &&
+                matchedRule.targetFolderId != savedInboxId
+            ) {
+                val moved = runCatching {
+                    client.moveMessages(listOf(msg.id to msg.changeKey), matchedRule.targetFolderId)
+                }.isSuccess
+                if (moved) {
+                    effectiveFolderId = matchedRule.targetFolderId
+                    inInbox = false
+                }
+            }
+            if (shouldNotifyForMessage(
+                    senderEmail = msg.senderEmail,
+                    effectiveFolderId = effectiveFolderId,
+                    isInbox = inInbox,
+                    savedInboxFolderId = savedInboxId,
+                    mutedFolderIds = mutedFolders,
+                    mutedSenders = mutedSenders
+                )
+            ) {
+                toNotify += msg
+            }
+        }
         if (toNotify.isNotEmpty()) {
             showNewMailNotification(context, toNotify)
         }

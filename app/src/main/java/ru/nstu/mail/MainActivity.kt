@@ -57,6 +57,12 @@ class MainActivity : ComponentActivity() {
             val notificationsEnabled by vm.notificationsEnabled.collectAsState()
             val notificationMode by vm.notificationMode.collectAsState()
             val notificationIntervalMinutes by vm.notificationIntervalMinutes.collectAsState()
+            val mutedFolderIds by vm.mutedFolderIds.collectAsState()
+            val mutedSenders by vm.mutedSenders.collectAsState()
+            val customTags by vm.customTags.collectAsState()
+            val tagSortRules by vm.tagSortRules.collectAsState()
+            val swipeRightAction by vm.swipeRightAction.collectAsState()
+            val swipeLeftAction by vm.swipeLeftAction.collectAsState()
             val pendingId by pendingMessageId.collectAsState()
 
             val darkTheme = when (themeMode) {
@@ -135,6 +141,11 @@ class MainActivity : ComponentActivity() {
                             avatars = avatars,
                             personProfiles = personProfiles,
                             knownNames = knownNames,
+                            mutedFolderIds = mutedFolderIds,
+                            tagSortRules = tagSortRules,
+                            availableTags = customTags,
+                            swipeRightAction = swipeRightAction,
+                            swipeLeftAction = swipeLeftAction,
                             onRequestAvatar = vm::requestAvatar,
                             onSelectFolder = vm::selectFolder,
                             onSelectFilter = vm::setFilter,
@@ -146,6 +157,13 @@ class MainActivity : ComponentActivity() {
                             onToggleSelect = vm::toggleSelection,
                             onClearSelection = vm::clearSelection,
                             onToggleFlag = vm::toggleFlag,
+                            onToggleReadSummary = vm::toggleReadSummary,
+                            onDeleteSummary = vm::deleteSummary,
+                            onMoveSummary = vm::moveSummary,
+                            onToggleSpamSummary = vm::toggleSpamSummary,
+                            onToggleFolderNotifications = vm::toggleFolderNotifications,
+                            onSaveTagSortRule = vm::saveTagSortRule,
+                            onRemoveTagSortRule = vm::removeTagSortRule,
                             onBatchSetRead = vm::batchSetRead,
                             onBatchMove = vm::batchMove,
                             onBatchDelete = vm::batchDelete,
@@ -174,6 +192,7 @@ class MainActivity : ComponentActivity() {
                                 avatars = avatars,
                                 personProfiles = personProfiles,
                                 knownNames = knownNames,
+                                mutedSenders = mutedSenders,
                                 loadingProfiles = loadingProfiles,
                                 darkTheme = darkTheme,
                                 isDownloadingAttachment = state.isDownloadingAttachment,
@@ -181,6 +200,7 @@ class MainActivity : ComponentActivity() {
                                 onBack = vm::backToMailList,
                                 onRequestAvatar = vm::requestAvatar,
                                 onRequestPersonProfile = vm::requestPersonProfile,
+                                onToggleSenderNotifications = vm::toggleSenderNotifications,
                                 onComposeTo = { email, name ->
                                     vm.openCompose(prefillTo = email, prefillName = name)
                                 },
@@ -211,6 +231,7 @@ class MainActivity : ComponentActivity() {
                         avatars = avatars,
                         personProfiles = personProfiles,
                         knownNames = knownNames,
+                        availableTags = customTags,
                         isSending = state.isSending,
                         errorMessage = state.errorMessage,
                         onBack = vm::backToMailList,
@@ -218,6 +239,7 @@ class MainActivity : ComponentActivity() {
                         onClearSuggestions = vm::clearDirectorySuggestions,
                         onRequestAvatar = vm::requestAvatar,
                         onRequestPersonProfile = vm::requestPersonProfile,
+                        onAddCustomTag = vm::addCustomTag,
                         onSubmit = vm::saveOrSendEmail
                     )
 
@@ -253,6 +275,13 @@ class MainActivity : ComponentActivity() {
                         notificationsEnabled = notificationsEnabled,
                         notificationMode = notificationMode,
                         notificationIntervalMinutes = notificationIntervalMinutes,
+                        folders = state.folders,
+                        mutedFolderIds = mutedFolderIds,
+                        mutedSenders = mutedSenders,
+                        tagSortRules = tagSortRules,
+                        availableTags = customTags,
+                        swipeRightAction = swipeRightAction,
+                        swipeLeftAction = swipeLeftAction,
                         updateChannel = updateChannel,
                         isCheckingUpdate = state.isCheckingUpdate,
                         toastMessage = state.toastMessage,
@@ -263,6 +292,12 @@ class MainActivity : ComponentActivity() {
                         onSetNotificationInterval = vm::setNotificationInterval,
                         onCheckNewMailNow = vm::checkNewMailNow,
                         onNotificationPermissionResult = vm::onNotificationPermissionResult,
+                        onUnmuteFolder = vm::unmuteFolderById,
+                        onUnmuteSender = vm::toggleSenderNotifications,
+                        onSaveTagSortRule = vm::saveTagSortRule,
+                        onRemoveTagSortRule = vm::removeTagSortRule,
+                        onSetSwipeRightAction = vm::setSwipeRightAction,
+                        onSetSwipeLeftAction = vm::setSwipeLeftAction,
                         onSetUpdateChannel = vm::setUpdateChannel,
                         onCheckUpdates = { vm.checkForUpdates(manual = true) },
                         onClearToast = vm::clearToast

@@ -45,10 +45,14 @@ import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.MailRulesStore
 import ru.nstu.mail.data.OutgoingAttachment
 import ru.nstu.mail.data.PersonProfile
+import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UpdateChannel
+import ru.nstu.mail.data.matchAutoSortRule
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.notify.MailNotificationHelper
 import ru.nstu.mail.notify.NotificationMode
@@ -127,6 +131,24 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     private val _notificationIntervalMinutes =
         MutableStateFlow(MailNotificationHelper.getIntervalMinutes(application))
     val notificationIntervalMinutes: StateFlow<Int> = _notificationIntervalMinutes.asStateFlow()
+
+    private val _mutedFolderIds = MutableStateFlow(MailRulesStore.getMutedFolderIds(application))
+    val mutedFolderIds: StateFlow<Set<String>> = _mutedFolderIds.asStateFlow()
+
+    private val _mutedSenders = MutableStateFlow(MailRulesStore.getMutedSenders(application))
+    val mutedSenders: StateFlow<Set<String>> = _mutedSenders.asStateFlow()
+
+    private val _customTags = MutableStateFlow(MailRulesStore.getCustomTags(application))
+    val customTags: StateFlow<List<String>> = _customTags.asStateFlow()
+
+    private val _tagSortRules = MutableStateFlow(MailRulesStore.getTagSortRules(application))
+    val tagSortRules: StateFlow<List<TagSortRule>> = _tagSortRules.asStateFlow()
+
+    private val _swipeRightAction = MutableStateFlow(MailRulesStore.getSwipeRightAction(application))
+    val swipeRightAction: StateFlow<SwipeAction> = _swipeRightAction.asStateFlow()
+
+    private val _swipeLeftAction = MutableStateFlow(MailRulesStore.getSwipeLeftAction(application))
+    val swipeLeftAction: StateFlow<SwipeAction> = _swipeLeftAction.asStateFlow()
 
     private var pendingNotificationMessageId: String? = null
 
@@ -258,6 +280,84 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun toggleFolderNotifications(folder: MailFolder) {
+        val app = getApplication<Application>()
+        val isInbox = folder.systemKind == SystemFolderKind.INBOX
+        val updated = MailRulesStore.toggleFolderMuted(app, folder.id, isInbox = isInbox)
+        _mutedFolderIds.value = updated
+        val muted = folder.id in updated || (isInbox && "inbox" in updated)
+        _state.update {
+            it.copy(
+                toastMessage = if (muted) {
+                    "Уведомления для «${folder.displayName}» выключены"
+                } else {
+                    "Уведомления для «${folder.displayName}» включены"
+                }
+            )
+        }
+    }
+
+    fun unmuteFolderById(folderId: String) {
+        val app = getApplication<Application>()
+        val updated = MailRulesStore.setFolderMuted(app, folderId, muted = false)
+        _mutedFolderIds.value = updated
+    }
+
+    fun toggleSenderNotifications(email: String) {
+        val clean = email.trim()
+        if (clean.isEmpty()) return
+        val app = getApplication<Application>()
+        val updated = MailRulesStore.toggleSenderMuted(app, clean)
+        _mutedSenders.value = updated
+        val muted = clean.lowercase() in updated
+        _state.update {
+            it.copy(
+                toastMessage = if (muted) {
+                    "Уведомления от $clean выключены"
+                } else {
+                    "Уведомления от $clean включены"
+                }
+            )
+        }
+    }
+
+    fun addCustomTag(tag: String) {
+        _customTags.value = MailRulesStore.addCustomTag(getApplication(), tag)
+    }
+
+    fun saveTagSortRule(tag: String, targetFolder: MailFolder) {
+        val app = getApplication<Application>()
+        val rule = TagSortRule(
+            tag = tag.trim(),
+            targetFolderId = targetFolder.id,
+            targetFolderName = targetFolder.displayName
+        )
+        _tagSortRules.value = MailRulesStore.upsertTagSortRule(app, rule)
+        _customTags.value = MailRulesStore.addCustomTag(app, rule.tag)
+        _state.update {
+            it.copy(toastMessage = "Тег [${rule.tag}] → «${targetFolder.displayName}»")
+        }
+        val c = client
+        val cur = _state.value.currentFolder
+        if (c != null && cur?.systemKind == SystemFolderKind.INBOX) {
+            applyAutoSortToMessages(c, _state.value.messages, cur)
+        }
+    }
+
+    fun removeTagSortRule(tag: String) {
+        _tagSortRules.value = MailRulesStore.removeTagSortRule(getApplication(), tag)
+    }
+
+    fun setSwipeRightAction(action: SwipeAction) {
+        MailRulesStore.setSwipeRightAction(getApplication(), action)
+        _swipeRightAction.value = action
+    }
+
+    fun setSwipeLeftAction(action: SwipeAction) {
+        MailRulesStore.setSwipeLeftAction(getApplication(), action)
+        _swipeLeftAction.value = action
+    }
+
     private fun rememberKnownNames(pairs: Iterable<Pair<String, String>>) {
         val current = _knownNames.value
         val additions = mutableMapOf<String, String>()
@@ -318,6 +418,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
                 val app = getApplication<Application>()
                 if (inbox?.systemKind == SystemFolderKind.INBOX) {
+                    MailRulesStore.setInboxFolderId(app, inbox.id)
                     MailNotificationHelper.recordSeenMessages(app, items)
                 }
                 MailNotificationHelper.syncBackgroundDelivery(app, replacePeriodic = false)
@@ -342,6 +443,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         reachedEnd = includesLast
                     )
                 }
+                applyAutoSortToMessages(newClient, items, inbox)
                 pendingNotificationMessageId?.let { pendingId ->
                     pendingNotificationMessageId = null
                     openMessageById(pendingId)
@@ -456,6 +558,10 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     filter = filter
                 )
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
+                val inbox = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
+                if (inbox != null) {
+                    MailRulesStore.setInboxFolderId(getApplication(), inbox.id)
+                }
                 if (updatedCurrent?.systemKind == SystemFolderKind.INBOX &&
                     reset &&
                     query.isBlank() &&
@@ -473,6 +579,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         messages = merged,
                         reachedEnd = includesLast
                     )
+                }
+                if (query.isBlank()) {
+                    applyAutoSortToMessages(c, items, updatedCurrent)
                 }
             } catch (e: Exception) {
                 _state.update {
@@ -747,6 +856,116 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Ошибка обновления флажка") }
+            }
+        }
+    }
+
+    fun toggleReadSummary(summary: EmailSummary) {
+        val c = client ?: return
+        val next = !summary.isRead
+        viewModelScope.launch {
+            try {
+                c.setRead(listOf(summary.id to summary.changeKey), next)
+                _state.update { st ->
+                    st.copy(
+                        messages = st.messages.map {
+                            if (it.id == summary.id) it.copy(isRead = next) else it
+                        },
+                        toastMessage = if (next) "Отмечено прочитанным" else "Отмечено непрочитанным"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
+            }
+        }
+    }
+
+    fun moveSummary(summary: EmailSummary, targetFolder: MailFolder) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                c.moveMessages(listOf(summary.id to summary.changeKey), targetFolder.id)
+                val folders = runCatching { c.getFolders() }.getOrNull()
+                _state.update { st ->
+                    st.copy(
+                        folders = folders ?: st.folders,
+                        messages = st.messages.filterNot { it.id == summary.id },
+                        toastMessage = "Перемещено в «${targetFolder.displayName}»"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Не удалось переместить письмо") }
+            }
+        }
+    }
+
+    fun toggleSpamSummary(summary: EmailSummary) {
+        val inJunk = _state.value.currentFolder?.systemKind == SystemFolderKind.JUNK
+        val targetKind = if (inJunk) SystemFolderKind.INBOX else SystemFolderKind.JUNK
+        val target = _state.value.folders.firstOrNull { it.systemKind == targetKind }
+        if (target == null) {
+            _state.update { it.copy(toastMessage = "Целевая папка не найдена") }
+            return
+        }
+        moveSummary(summary, target)
+    }
+
+    fun deleteSummary(summary: EmailSummary) {
+        val c = client ?: return
+        val hardDelete = _state.value.currentFolder?.systemKind == SystemFolderKind.DELETED
+        viewModelScope.launch {
+            try {
+                c.deleteMessages(listOf(summary.id to summary.changeKey), hardDelete)
+                val folders = runCatching { c.getFolders() }.getOrNull()
+                _state.update { st ->
+                    st.copy(
+                        folders = folders ?: st.folders,
+                        messages = st.messages.filterNot { it.id == summary.id },
+                        toastMessage = if (hardDelete) "Удалено навсегда" else "Перемещено в Удалённые"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Не удалось удалить письмо") }
+            }
+        }
+    }
+
+    private fun applyAutoSortToMessages(
+        c: EwsClient,
+        items: List<EmailSummary>,
+        currentFolder: MailFolder?
+    ) {
+        if (currentFolder?.systemKind != SystemFolderKind.INBOX) return
+        val rules = _tagSortRules.value
+        if (rules.isEmpty() || items.isEmpty()) return
+        val inboxId = currentFolder.id
+
+        val byTarget = mutableMapOf<String, MutableList<EmailSummary>>()
+        for (item in items) {
+            val matched = matchAutoSortRule(item.subject, rules) ?: continue
+            if (matched.targetFolderId.isNotBlank() && matched.targetFolderId != inboxId) {
+                byTarget.getOrPut(matched.targetFolderId) { mutableListOf() }.add(item)
+            }
+        }
+        if (byTarget.isEmpty()) return
+
+        viewModelScope.launch {
+            val movedIds = mutableSetOf<String>()
+            for ((targetId, list) in byTarget) {
+                runCatching {
+                    c.moveMessages(list.map { it.id to it.changeKey }, targetId)
+                    movedIds.addAll(list.map { it.id })
+                }
+            }
+            if (movedIds.isNotEmpty()) {
+                val folders = runCatching { c.getFolders() }.getOrNull()
+                _state.update { st ->
+                    st.copy(
+                        folders = folders ?: st.folders,
+                        messages = st.messages.filterNot { it.id in movedIds },
+                        selectedIds = st.selectedIds - movedIds
+                    )
+                }
             }
         }
     }
@@ -1371,6 +1590,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         pendingNotificationMessageId = null
         store.clear()
         MailNotificationHelper.clearOnLogout(getApplication())
+        _mutedFolderIds.value = emptySet()
+        _mutedSenders.value = emptySet()
+        _tagSortRules.value = emptyList()
         requestedAvatars.clear()
         requestedProfiles.clear()
         _avatars.value = emptyMap()

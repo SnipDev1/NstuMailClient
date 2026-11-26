@@ -19,7 +19,13 @@ import ru.nstu.mail.data.OutgoingAttachment
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.extractAllTagsForMatching
+import ru.nstu.mail.data.extractSubjectTags
+import ru.nstu.mail.data.formatSubjectWithTags
+import ru.nstu.mail.data.matchAutoSortRule
 import ru.nstu.mail.data.participants
+import ru.nstu.mail.data.shouldNotifyForMessage
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.selectNewMessagesToNotify
 import ru.nstu.mail.ui.extractInitials
@@ -715,5 +721,65 @@ class EwsXmlTest {
             linkHex = "#5CDAA5"
         )
         assertTrue(plainDoc.contains("&lt;b&gt;Привет&lt;/b&gt;"))
+    }
+
+    @Test
+    fun `subject tags, auto-sort rules, and notification filters work together`() {
+        val (tags, clean) = extractSubjectTags("[ПЗ] [Лаба] Отчёт по работе")
+        assertEquals(listOf("ПЗ", "Лаба"), tags)
+        assertEquals("Отчёт по работе", clean)
+
+        assertEquals("[ПЗ] [Лаба] Отчёт", formatSubjectWithTags("[ПЗ] Отчёт", listOf("ПЗ", "Лаба", "пз")))
+        assertEquals(listOf("ПЗ", "Срочно"), extractAllTagsForMatching("Re: Отчёт [ПЗ] #Срочно"))
+
+        val rules = listOf(TagSortRule(tag = "пз", targetFolderId = "f_pz", targetFolderName = "Практика"))
+        val matched = matchAutoSortRule("[ПЗ] Задание 3", rules)
+        assertEquals("f_pz", matched?.targetFolderId)
+        assertNull(matchAutoSortRule("[Лекция] Слайды", rules))
+
+        // Sorted to muted folder -> no notification
+        assertFalse(
+            shouldNotifyForMessage(
+                senderEmail = "prof@corp.nstu.ru",
+                effectiveFolderId = "f_pz",
+                isInbox = false,
+                savedInboxFolderId = "f_inbox",
+                mutedFolderIds = setOf("f_pz"),
+                mutedSenders = emptySet()
+            )
+        )
+        // Sorted to unmuted folder even if Inbox is muted -> notifies!
+        assertTrue(
+            shouldNotifyForMessage(
+                senderEmail = "prof@corp.nstu.ru",
+                effectiveFolderId = "f_pz",
+                isInbox = false,
+                savedInboxFolderId = "f_inbox",
+                mutedFolderIds = setOf("f_inbox", "inbox"),
+                mutedSenders = emptySet()
+            )
+        )
+        // Muted sender in unmuted folder -> no notification
+        assertFalse(
+            shouldNotifyForMessage(
+                senderEmail = "Prof@corp.nstu.ru ",
+                effectiveFolderId = "f_pz",
+                isInbox = false,
+                savedInboxFolderId = "f_inbox",
+                mutedFolderIds = emptySet(),
+                mutedSenders = setOf("prof@corp.nstu.ru")
+            )
+        )
+        // Normal message in unmuted Inbox -> notifies
+        assertTrue(
+            shouldNotifyForMessage(
+                senderEmail = "prof@corp.nstu.ru",
+                effectiveFolderId = "f_inbox",
+                isInbox = true,
+                savedInboxFolderId = "f_inbox",
+                mutedFolderIds = setOf("f_pz"),
+                mutedSenders = emptySet()
+            )
+        )
     }
 }

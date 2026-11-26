@@ -46,6 +46,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -53,6 +55,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -94,6 +97,7 @@ import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.extractSubjectTags
 import ru.nstu.mail.data.participants
 import java.io.ByteArrayInputStream
 
@@ -106,6 +110,7 @@ fun MessageDetailScreen(
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
+    mutedSenders: Set<String>,
     loadingProfiles: Set<String>,
     darkTheme: Boolean,
     isDownloadingAttachment: Boolean,
@@ -113,6 +118,7 @@ fun MessageDetailScreen(
     onBack: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestPersonProfile: (name: String, email: String) -> Unit,
+    onToggleSenderNotifications: (String) -> Unit,
     onComposeTo: (email: String, name: String) -> Unit,
     onToggleRead: (EmailDetail) -> Unit,
     onToggleFlag: (EmailDetail) -> Unit,
@@ -151,12 +157,18 @@ fun MessageDetailScreen(
         val key = person.email.trim().lowercase().ifBlank { person.name.trim().lowercase() }
         val profile = personProfiles[key]
         val fullName = resolveDisplayName(person.name, person.email, profile, knownNames)
+        val dialogEmail = profile?.email?.takeIf { it.isNotBlank() } ?: person.email
+        val senderMuted = dialogEmail.trim().lowercase() in mutedSenders
         PersonInfoDialog(
             participant = person,
             photo = avatars[person.email.trim().lowercase()],
             profile = profile,
             knownNames = knownNames,
             isLoadingProfile = key in loadingProfiles,
+            notificationsMuted = senderMuted,
+            onToggleNotifications = {
+                if (dialogEmail.isNotBlank()) onToggleSenderNotifications(dialogEmail)
+            },
             onRequestProfile = { onRequestPersonProfile(person.name, person.email) },
             onRequestAvatar = onRequestAvatar,
             onCompose = {
@@ -290,6 +302,27 @@ fun MessageDetailScreen(
                                 },
                                 onClick = { moreMenuExpanded = false; onToggleSpam(detail) }
                             )
+                            if (detail.fromEmail.isNotBlank()) {
+                                val fromMuted = detail.fromEmail.trim().lowercase() in mutedSenders
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (fromMuted) "Уведомления от отправителя: выкл (вкл.)"
+                                            else "Уведомления от отправителя: вкл (выкл.)"
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (fromMuted) Icons.Default.NotificationsOff else Icons.Default.Notifications,
+                                            null
+                                        )
+                                    },
+                                    onClick = {
+                                        moreMenuExpanded = false
+                                        onToggleSenderNotifications(detail.fromEmail)
+                                    }
+                                )
+                            }
                             if (darkTheme) {
                                 DropdownMenuItem(
                                     text = {
@@ -325,17 +358,34 @@ fun MessageDetailScreen(
             }
 
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                if (detail.importance == EmailImportance.HIGH) {
-                    Text(
-                        text = "Высокая важность",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(2.dp))
+                val (subjectTags, cleanSubject) = remember(detail.subject) {
+                    extractSubjectTags(detail.subject)
+                }
+                if (subjectTags.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        subjectTags.forEach { tag ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = tag,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                 }
                 Text(
-                    text = detail.subject,
+                    text = cleanSubject.ifBlank { detail.subject },
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -638,6 +688,8 @@ private fun PersonInfoDialog(
     profile: PersonProfile?,
     knownNames: Map<String, String>,
     isLoadingProfile: Boolean,
+    notificationsMuted: Boolean,
+    onToggleNotifications: () -> Unit,
     onRequestProfile: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onCompose: () -> Unit,
@@ -694,6 +746,28 @@ private fun PersonInfoDialog(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                         textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    FilterChip(
+                        selected = !notificationsMuted,
+                        onClick = onToggleNotifications,
+                        label = {
+                            Text(
+                                if (notificationsMuted) "Уведомления выключены"
+                                else "Уведомления включены"
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (notificationsMuted) {
+                                    Icons.Default.NotificationsOff
+                                } else {
+                                    Icons.Default.Notifications
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     )
                 }
 

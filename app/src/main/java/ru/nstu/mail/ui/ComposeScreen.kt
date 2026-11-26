@@ -37,6 +37,8 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -75,10 +77,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.nstu.mail.data.ContactEntry
+import ru.nstu.mail.data.DEFAULT_TAGS
 import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
+import ru.nstu.mail.data.extractSubjectTags
+import ru.nstu.mail.data.formatSubjectWithTags
 import ru.nstu.mail.data.parseFormattedRecipient
 import java.util.concurrent.atomic.AtomicLong
 
@@ -124,6 +129,7 @@ fun ComposeScreen(
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
+    availableTags: List<String>,
     isSending: Boolean,
     errorMessage: String?,
     onBack: () -> Unit,
@@ -131,6 +137,7 @@ fun ComposeScreen(
     onClearSuggestions: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestPersonProfile: (name: String, email: String) -> Unit,
+    onAddCustomTag: (String) -> Unit,
     onSubmit: (
         draftId: String?,
         draftChangeKey: String?,
@@ -218,24 +225,37 @@ fun ComposeScreen(
     var editingId by remember { mutableStateOf<Long?>(null) }
     var editingText by remember { mutableStateOf("") }
 
-    var subject by rememberSaveable {
-        mutableStateOf(
-            when {
-                draft != null -> if (draft.subject == "(Без темы)") "" else draft.subject
-                replyTo == null -> ""
-                isForward -> if (replyTo.subject.startsWith("Fwd:", ignoreCase = true)) {
+    val initialParsedSubject = remember(draft?.id, draft?.subject, replyTo?.id, isForward) {
+        when {
+            draft != null -> if (draft.subject == "(Без темы)") {
+                emptyList<String>() to ""
+            } else {
+                extractSubjectTags(draft.subject)
+            }
+            replyTo == null -> emptyList<String>() to ""
+            isForward -> {
+                val base = if (replyTo.subject.startsWith("Fwd:", ignoreCase = true)) {
                     replyTo.subject
                 } else {
                     "Fwd: ${replyTo.subject}"
                 }
-                else -> if (replyTo.subject.startsWith("Re:", ignoreCase = true)) {
+                emptyList<String>() to base
+            }
+            else -> {
+                val base = if (replyTo.subject.startsWith("Re:", ignoreCase = true)) {
                     replyTo.subject
                 } else {
                     "Re: ${replyTo.subject}"
                 }
+                emptyList<String>() to base
             }
-        )
+        }
     }
+
+    var selectedTags by rememberSaveable { mutableStateOf(initialParsedSubject.first) }
+    var subject by rememberSaveable { mutableStateOf(initialParsedSubject.second) }
+    var showAddTagDialog by remember { mutableStateOf(false) }
+
     var body by rememberSaveable {
         mutableStateOf(
             when {
@@ -256,9 +276,6 @@ fun ComposeScreen(
                 else -> ""
             }
         )
-    }
-    var importance by rememberSaveable {
-        mutableStateOf(draft?.importance ?: EmailImportance.NORMAL)
     }
     var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
 
@@ -370,18 +387,54 @@ fun ComposeScreen(
 
     fun submitEmail(send: Boolean) {
         commitInlineEdit()
+        val finalSubject = formatSubjectWithTags(subject, selectedTags)
         onSubmit(
             draft?.id,
             draft?.changeKey,
             collectAddressesForSubmit(ActiveRecipientField.TO),
             collectAddressesForSubmit(ActiveRecipientField.CC),
             collectAddressesForSubmit(ActiveRecipientField.BCC),
-            subject,
+            finalSubject,
             body,
-            importance,
+            EmailImportance.NORMAL,
             selectedUris,
             context,
             send
+        )
+    }
+
+    if (showAddTagDialog) {
+        var newTag by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddTagDialog = false },
+            title = { Text("Новый тег") },
+            text = {
+                OutlinedTextField(
+                    value = newTag,
+                    onValueChange = { newTag = it.take(24) },
+                    label = { Text("Название тега (напр. ПЗ)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val clean = newTag.trim().replace("[", "").replace("]", "")
+                        if (clean.isNotEmpty()) {
+                            onAddCustomTag(clean)
+                            if (selectedTags.none { it.equals(clean, ignoreCase = true) }) {
+                                selectedTags = selectedTags + clean
+                            }
+                        }
+                        showAddTagDialog = false
+                    },
+                    enabled = newTag.isNotBlank()
+                ) { Text("Добавить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddTagDialog = false }) { Text("Отмена") }
+            }
         )
     }
 
@@ -630,6 +683,9 @@ fun ComposeScreen(
             )
             Spacer(Modifier.height(8.dp))
 
+            val allTagChoices = remember(availableTags, selectedTags) {
+                (DEFAULT_TAGS + availableTags + selectedTags).distinctBy { it.lowercase() }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -637,14 +693,25 @@ fun ComposeScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Важность:", style = MaterialTheme.typography.labelMedium)
-                EmailImportance.entries.forEach { imp ->
+                Text("Теги:", style = MaterialTheme.typography.labelMedium)
+                allTagChoices.forEach { tag ->
+                    val isSelected = selectedTags.any { it.equals(tag, ignoreCase = true) }
                     FilterChip(
-                        selected = importance == imp,
-                        onClick = { importance = imp },
-                        label = { Text(imp.labelRu) }
+                        selected = isSelected,
+                        onClick = {
+                            selectedTags = if (isSelected) {
+                                selectedTags.filterNot { it.equals(tag, ignoreCase = true) }
+                            } else {
+                                selectedTags + tag
+                            }
+                        },
+                        label = { Text(tag) }
                     )
                 }
+                AssistChip(
+                    onClick = { showAddTagDialog = true },
+                    label = { Text("+ Тег") }
+                )
             }
 
             if (selectedUris.isNotEmpty() || (draft?.attachments?.isNotEmpty() == true)) {
