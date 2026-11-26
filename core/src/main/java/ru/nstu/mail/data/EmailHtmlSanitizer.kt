@@ -95,10 +95,12 @@ object EmailHtmlSanitizer {
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=4.0"/>
 <meta name="color-scheme" content="$colorScheme"/>
 <style>
+html, body, p, div, td, th, li, blockquote, pre, code {
+  color: $textHex;
+}
 html, body {
   margin: 0;
   padding: 0;
-  color: $textHex;
   background: $bgHex;
   font-family: -apple-system, Roboto, sans-serif;
   font-size: 15px;
@@ -110,7 +112,7 @@ body { padding: 16px; }
 a { color: $linkHex; }
 img { max-width: 100% !important; height: auto !important; }
 table { max-width: 100% !important; border-collapse: collapse; }
-blockquote { border-left: 3px solid $linkHex; margin: 8px 0 8px 4px; padding-left: 12px; opacity: 0.9; }
+blockquote { border-left: 3px solid $linkHex; margin: 8px 0 8px 4px; padding-left: 12px; }
 pre, code, .plain-text { white-space: pre-wrap; overflow-wrap: anywhere; font-family: -apple-system, Roboto, sans-serif; }
 hr { border: 0; border-top: 1px solid $hrColor; }
 </style>
@@ -132,6 +134,7 @@ hr { border: 0; border-top: 1px solid $hrColor; }
                 }
             }
 
+            val hasDarkElementBg = !darkMode && hasDarkBackground(el)
             if (darkMode) {
                 if (el.hasAttr("bgcolor")) {
                     val lum = parseColorLuminance(el.attr("bgcolor"))
@@ -145,10 +148,12 @@ hr { border: 0; border-top: 1px solid $hrColor; }
                         el.removeAttr("color")
                     }
                 }
+            } else if (el.hasAttr("color") && !hasDarkElementBg && isNeutralGrayColor(el.attr("color"))) {
+                el.removeAttr("color")
             }
 
             if (el.hasAttr("style")) {
-                val cleanStyle = sanitizeInlineStyle(el.attr("style"), darkMode)
+                val cleanStyle = sanitizeInlineStyle(el.attr("style"), darkMode, hasDarkElementBg)
                 if (cleanStyle.isBlank()) {
                     el.removeAttr("style")
                 } else {
@@ -159,7 +164,37 @@ hr { border: 0; border-top: 1px solid $hrColor; }
         toRemove.forEach { it.remove() }
     }
 
-    private fun sanitizeInlineStyle(rawStyle: String, darkMode: Boolean): String {
+    private fun hasDarkBackground(el: org.jsoup.nodes.Element): Boolean {
+        val bgAttr = el.attr("bgcolor").trim()
+        if (bgAttr.isNotEmpty()) {
+            val lum = parseColorLuminance(bgAttr)
+            if (lum != null && lum <= 0.40) return true
+        }
+        val rawStyle = el.attr("style")
+        if (rawStyle.isNotEmpty()) {
+            for (decl in rawStyle.split(';')) {
+                val idx = decl.indexOf(':')
+                if (idx <= 0) continue
+                val prop = decl.substring(0, idx).trim().lowercase()
+                if (prop == "background" || prop == "background-color") {
+                    val lum = parseColorLuminance(decl.substring(idx + 1))
+                    if (lum != null && lum <= 0.40) return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun isNeutralGrayColor(rawValue: String): Boolean {
+        val rgb = parseColorRgb(rawValue) ?: return false
+        val maxChannel = maxOf(rgb[0], rgb[1], rgb[2])
+        val minChannel = minOf(rgb[0], rgb[1], rgb[2])
+        if (maxChannel - minChannel > 28) return false
+        val lum = luminanceFromRgb(rgb)
+        return lum in 0.05..0.60
+    }
+
+    private fun sanitizeInlineStyle(rawStyle: String, darkMode: Boolean, hasDarkElementBg: Boolean): String {
         val kept = mutableListOf<String>()
         for (decl in rawStyle.split(';')) {
             val colonIdx = decl.indexOf(':')
@@ -190,19 +225,31 @@ hr { border: 0; border-top: 1px solid $hrColor; }
                     val lum = parseColorLuminance(value)
                     if (lum == null || lum < 0.42) continue
                 }
+            } else if (prop == "color" && !hasDarkElementBg && isNeutralGrayColor(value)) {
+                continue
             }
             kept += "$prop: $value"
         }
         return kept.joinToString("; ")
     }
 
-    private fun parseColorLuminance(rawValue: String): Double? {
+    private fun parseColorLuminance(rawValue: String): Double? =
+        parseColorRgb(rawValue)?.let(::luminanceFromRgb)
+
+    private fun luminanceFromRgb(rgb: IntArray): Double {
+        val r = rgb[0] / 255.0
+        val g = rgb[1] / 255.0
+        val b = rgb[2] / 255.0
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    private fun parseColorRgb(rawValue: String): IntArray? {
         val token = rawValue.trim().lowercase()
             .substringBefore('!')
             .trim()
 
-        val rgb: IntArray? = when {
-            token == "transparent" -> return 1.0
+        return when {
+            token == "transparent" -> null
             token in COLOR_NAMED -> COLOR_NAMED[token]
             token.startsWith("#") -> parseHexRgb(token)
             token.startsWith("rgb") -> parseFuncRgb(token)
@@ -211,11 +258,6 @@ hr { border: 0; border-top: 1px solid $hrColor; }
                 if (hexMatch != null) parseHexRgb(hexMatch) else null
             }
         }
-        if (rgb == null) return null
-        val r = rgb[0] / 255.0
-        val g = rgb[1] / 255.0
-        val b = rgb[2] / 255.0
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b
     }
 
     private fun parseHexRgb(hex: String): IntArray? {

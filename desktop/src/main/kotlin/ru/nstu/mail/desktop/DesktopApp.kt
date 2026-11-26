@@ -1215,10 +1215,10 @@ private fun DesktopMessageDetailPane(
         HorizontalDivider()
         val effectiveDark = darkTheme && !forceLight
         val bgHex = if (effectiveDark) "#101512" else "#FFFFFF"
-        val fgHex = if (effectiveDark) "#E0E4E0" else "#181D1A"
+        val fgHex = if (effectiveDark) "#E0E4E0" else "#000000"
         val linkHex = if (effectiveDark) "#5CDAA5" else "#006B47"
         val bgColor = if (effectiveDark) Color(0xFF101512) else Color.White
-        val fgColor = if (effectiveDark) Color(0xFFE0E4E0) else Color(0xFF181D1A)
+        val fgColor = if (effectiveDark) Color(0xFFE0E4E0) else Color.Black
         val fontScale = LocalDensity.current.fontScale.coerceIn(0.85f, 2.0f)
         val baseHtml = remember(detail.id, detail.body, detail.isHtml, effectiveDark) {
             EmailHtmlSanitizer.renderEmailDocument(
@@ -1250,7 +1250,7 @@ private fun DesktopMessageDetailPane(
             ) {
                 Text(
                     text = plainPreview,
-                    color = fgColor.copy(alpha = 0.45f),
+                    color = fgColor,
                     style = MaterialTheme.typography.bodyMedium,
                     overflow = TextOverflow.Clip
                 )
@@ -1263,6 +1263,8 @@ private fun DesktopMessageDetailPane(
                     val editor = JEditorPane().apply {
                         contentType = "text/html"
                         isEditable = false
+                        background = java.awt.Color(bgColor.toArgb())
+                        foreground = java.awt.Color(fgColor.toArgb())
                         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
                         addHyperlinkListener { ev ->
                             if (ev.eventType == HyperlinkEvent.EventType.ACTIVATED) {

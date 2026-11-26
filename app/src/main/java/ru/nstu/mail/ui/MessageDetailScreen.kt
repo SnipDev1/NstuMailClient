@@ -471,7 +471,7 @@ fun MessageDetailScreen(
 
             val effectiveDarkBody = darkTheme && !forceLightBody
             val bodyBgColor = if (effectiveDarkBody) MaterialTheme.colorScheme.surface else Color.White
-            val bodyTextColor = if (effectiveDarkBody) MaterialTheme.colorScheme.onSurface else Color(0xFF1B1B1B)
+            val bodyTextColor = if (effectiveDarkBody) MaterialTheme.colorScheme.onSurface else Color.Black
             val bodyLinkColor = if (effectiveDarkBody) MaterialTheme.colorScheme.primary else Color(0xFF006B47)
 
             val bgHex = bodyBgColor.toCssHex()

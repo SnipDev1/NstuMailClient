@@ -1352,4 +1352,27 @@ class EwsXmlTest {
         assertTrue(sysTemplates.isEmpty())
         assertTrue(sysRules.isEmpty())
     }
+
+    @Test
+    fun `renderEmailDocument normalizes neutral gray body text to black in light mode while keeping accents`() {
+        val rawHtml = """
+            <p style="color: #555555; font-size: 14px;">Основной текст</p>
+            <font color="gray">Подпись</font>
+            <span style="color: #b71c1c;">Важное предупреждение</span>
+            <div style="background-color: #222222; color: #ffffff;">Кнопка</div>
+        """.trimIndent()
+        val rendered = EmailHtmlSanitizer.renderEmailDocument(
+            body = rawHtml,
+            isHtml = true,
+            darkMode = false,
+            bgHex = "#FFFFFF",
+            textHex = "#000000",
+            linkHex = "#006B47"
+        )
+        assertTrue(rendered.contains("color: #000000;"))
+        assertFalse(rendered.contains("#555555"))
+        assertFalse(rendered.contains("color=\"gray\""))
+        assertTrue(rendered.contains("#b71c1c"))
+        assertTrue(rendered.contains("#ffffff"))
+    }
 }
