@@ -21,6 +21,7 @@ import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.applyUniqueSubtreeCounts
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.extractAllTagsForMatching
@@ -119,8 +120,8 @@ class EwsXmlTest {
 
         assertEquals("Учёба", folders[1].displayName)
         assertEquals(0, folders[1].depth)
-        assertEquals(3, folders[1].unreadCount)
-        assertEquals(15, folders[1].totalCount)
+        assertEquals(1, folders[1].unreadCount)
+        assertEquals(10, folders[1].totalCount)
         assertFalse(folders[1].isSystem)
 
         assertEquals("Лабы", folders[2].displayName)
@@ -1011,5 +1012,84 @@ class EwsXmlTest {
         val clamped = adjustFolderUnreadDelta(afterRead, "f-leaf", -5)
         assertEquals(0, clamped.first { it.id == "f-leaf" }.unreadCount)
         assertEquals(0, clamped.first { it.id == "f-root" }.unreadCount)
+    }
+
+    @Test
+    fun `applyUniqueSubtreeCounts deduplicates messages across parent and child folders`() {
+        val req = EwsXml.buildFindFolderMessageKeysRequest(listOf("f-parent", "f-child"))
+        assertTrue(req.contains("""FieldURI="message:InternetMessageId""""))
+        assertTrue(req.contains("""<t:FolderId Id="f-parent"/>"""))
+        assertTrue(req.contains("""<t:FolderId Id="f-child"/>"""))
+
+        val xml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="i1"/>
+                            <t:Subject>Первое</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T10:00:00Z</t:DateTimeReceived>
+                            <t:IsRead>false</t:IsRead>
+                            <t:InternetMessageId>&lt;m1@nstu.ru&gt;</t:InternetMessageId>
+                          </t:Message>
+                          <t:Message>
+                            <t:ItemId Id="i2-parent"/>
+                            <t:Subject>Общее</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T11:00:00Z</t:DateTimeReceived>
+                            <t:IsRead>false</t:IsRead>
+                            <t:InternetMessageId>&lt;m2@nstu.ru&gt;</t:InternetMessageId>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="i2-child"/>
+                            <t:Subject>Общее</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T11:00:00Z</t:DateTimeReceived>
+                            <t:IsRead>true</t:IsRead>
+                            <t:InternetMessageId>&lt;m2@nstu.ru&gt;</t:InternetMessageId>
+                          </t:Message>
+                          <t:Message>
+                            <t:ItemId Id="i3-child"/>
+                            <t:Subject>Только в дочерней</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T12:00:00Z</t:DateTimeReceived>
+                            <t:IsRead>false</t:IsRead>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        val keysByFolder = EwsXml.parseFindFolderMessageKeysResponse(xml, listOf("f-parent", "f-child"))
+        assertEquals(2, keysByFolder.size)
+
+        val rawFolders = listOf(
+            ru.nstu.mail.data.MailFolder("f-inbox", "", "", "Входящие", totalCount = 9, unreadCount = 4, childFolderCount = 0, depth = 0, systemKind = SystemFolderKind.INBOX),
+            ru.nstu.mail.data.MailFolder("f-parent", "", "", "Учёба", totalCount = 2, unreadCount = 2, childFolderCount = 1, depth = 0),
+            ru.nstu.mail.data.MailFolder("f-child", "", "f-parent", "ПЗ", totalCount = 2, unreadCount = 1, childFolderCount = 0, depth = 1)
+        )
+        val merged = applyUniqueSubtreeCounts(rawFolders, keysByFolder)
+
+        // Inbox untouched
+        assertEquals(9, merged[0].totalCount)
+        assertEquals(4, merged[0].unreadCount)
+        // Parent deduplicates M1 (unread), M2 (read in child -> read in parent), M3 (unread) => 2/3
+        assertEquals(3, merged[1].totalCount)
+        assertEquals(2, merged[1].unreadCount)
+        // Leaf child keeps own counts => 1/2
+        assertEquals(2, merged[2].totalCount)
+        assertEquals(1, merged[2].unreadCount)
     }
 }

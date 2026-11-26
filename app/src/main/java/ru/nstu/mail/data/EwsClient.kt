@@ -52,7 +52,24 @@ class EwsClient(private val credentials: Credentials) {
         }
 
         val findXml = postSoapWithAuthFallback(EwsXml.buildFindFoldersRequest())
-        EwsXml.parseFindFoldersResponse(findXml, cachedRootFolderId, cachedSystemIdMap)
+        val folders = EwsXml.parseFindFoldersResponse(findXml, cachedRootFolderId, cachedSystemIdMap)
+        val byId = folders.associateBy { it.id }
+        val parentIds = folders.mapNotNull { it.parentId.takeIf { pid -> pid in byId } }.toSet()
+        if (parentIds.isEmpty()) return@withContext folders
+
+        val subtreeFolderIds = folders
+            .filter { it.id in parentIds || it.parentId in byId }
+            .map { it.id }
+        val mergedKeys = mutableMapOf<String, Pair<List<FolderMessageKey>, Boolean>>()
+        val fetched = runCatching {
+            for (chunk in subtreeFolderIds.chunked(20)) {
+                val keysXml = postSoapWithAuthFallback(EwsXml.buildFindFolderMessageKeysRequest(chunk))
+                mergedKeys += EwsXml.parseFindFolderMessageKeysResponse(keysXml, chunk)
+            }
+            true
+        }.getOrDefault(false)
+        if (!fetched) return@withContext folders
+        applyUniqueSubtreeCounts(folders, mergedKeys)
     }
 
     suspend fun createFolder(displayName: String, parentFolderId: String? = null) =

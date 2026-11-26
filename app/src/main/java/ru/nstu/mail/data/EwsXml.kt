@@ -177,34 +177,12 @@ object EwsXml {
             )
         )
 
-        val rolledUpCounts = mutableMapOf<String, Pair<Int, Int>>()
-        val rollingVisited = mutableSetOf<String>()
-        fun computeRolledUp(node: MailFolder): Pair<Int, Int> {
-            rolledUpCounts[node.id]?.let { return it }
-            if (!rollingVisited.add(node.id)) return node.totalCount to node.unreadCount
-            var total = node.totalCount
-            var unread = node.unreadCount
-            for (child in childrenByParent[node.id].orEmpty()) {
-                val (ct, cu) = computeRolledUp(child)
-                total += ct
-                unread += cu
-            }
-            val pair = total to unread
-            rolledUpCounts[node.id] = pair
-            return pair
-        }
-
         val ordered = mutableListOf<MailFolder>()
         val visited = mutableSetOf<String>()
 
         fun appendTree(node: MailFolder, depth: Int) {
             if (!visited.add(node.id)) return
-            val (rolledTotal, rolledUnread) = computeRolledUp(node)
-            ordered += node.copy(
-                depth = depth,
-                totalCount = rolledTotal,
-                unreadCount = rolledUnread
-            )
+            ordered += node.copy(depth = depth)
             val children = childrenByParent[node.id]
                 ?.sortedWith(
                     compareBy<MailFolder>(
@@ -729,6 +707,72 @@ object EwsXml {
             </m:MoveItem>
             """.trimIndent()
         )
+    }
+
+    fun buildFindFolderMessageKeysRequest(
+        folderIds: List<String>,
+        maxPerFolder: Int = 500
+    ): String {
+        val parentIds = folderIds.joinToString("\n        ") {
+            """<t:FolderId Id="${escapeXml(it)}"/>"""
+        }
+        return wrapSoap(
+            """
+            <m:FindItem Traversal="Shallow">
+              <m:ItemShape>
+                <t:BaseShape>IdOnly</t:BaseShape>
+                <t:AdditionalProperties>
+                  <t:FieldURI FieldURI="message:InternetMessageId"/>
+                  <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:FieldURI FieldURI="item:Subject"/>
+                  <t:FieldURI FieldURI="item:DateTimeReceived"/>
+                </t:AdditionalProperties>
+              </m:ItemShape>
+              <m:IndexedPageItemView MaxEntriesReturned="$maxPerFolder" Offset="0" BasePoint="Beginning"/>
+              <m:ParentFolderIds>
+                $parentIds
+              </m:ParentFolderIds>
+            </m:FindItem>
+            """.trimIndent()
+        )
+    }
+
+    fun parseFindFolderMessageKeysResponse(
+        xml: String,
+        requestedFolderIds: List<String>
+    ): Map<String, Pair<List<FolderMessageKey>, Boolean>> {
+        val doc = parseDocument(xml)
+        val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
+        if (faults.length > 0) checkSoapErrors(doc)
+
+        val respMessages = doc.getElementsByTagNameNS(EWS_MESSAGES, "FindItemResponseMessage")
+        val result = mutableMapOf<String, Pair<List<FolderMessageKey>, Boolean>>()
+        val count = minOf(respMessages.length, requestedFolderIds.size)
+        for (i in 0 until count) {
+            val respEl = respMessages.item(i) as? Element ?: continue
+            if (!respEl.getAttribute("ResponseClass").equals("Success", ignoreCase = true)) continue
+            val rootFolder = respEl.firstChildElement(EWS_MESSAGES, "RootFolder") ?: continue
+            val includesLast = !rootFolder.getAttribute("IncludesLastItemInRange")
+                .equals("false", ignoreCase = true)
+
+            val keys = mutableListOf<FolderMessageKey>()
+            val messages = rootFolder.getElementsByTagNameNS(EWS_TYPES, "Message")
+            for (j in 0 until messages.length) {
+                val msg = messages.item(j) as? Element ?: continue
+                val internetMsgId = msg.firstChildText(EWS_TYPES, "InternetMessageId").trim().lowercase()
+                val subject = msg.firstChildText(EWS_TYPES, "Subject").trim().lowercase()
+                val receivedAt = msg.firstChildText(EWS_TYPES, "DateTimeReceived").trim()
+                val itemId = msg.firstChildElement(EWS_TYPES, "ItemId")?.getAttribute("Id").orEmpty()
+                val dedupKey = internetMsgId.ifBlank {
+                    if (subject.isNotEmpty() || receivedAt.isNotEmpty()) "$subject|$receivedAt" else itemId
+                }
+                if (dedupKey.isBlank()) continue
+                val isRead = msg.firstChildText(EWS_TYPES, "IsRead").equals("true", ignoreCase = true)
+                keys += FolderMessageKey(dedupKey = dedupKey, isRead = isRead)
+            }
+            result[requestedFolderIds[i]] = keys to includesLast
+        }
+        return result
     }
 
     fun buildCopyItemsRequest(items: List<Pair<String, String>>, targetFolderId: String): String {
@@ -1432,6 +1476,65 @@ object EwsXml {
     $bodyContent
   </soap:Body>
 </soap:Envelope>"""
+    }
+}
+
+data class FolderMessageKey(
+    val dedupKey: String,
+    val isRead: Boolean
+)
+
+fun applyUniqueSubtreeCounts(
+    folders: List<MailFolder>,
+    messagesByFolder: Map<String, Pair<List<FolderMessageKey>, Boolean>>
+): List<MailFolder> {
+    if (folders.isEmpty() || messagesByFolder.isEmpty()) return folders
+    val byId = folders.associateBy { it.id }
+    val childrenByParent = mutableMapOf<String, MutableList<String>>()
+    for (folder in folders) {
+        if (folder.parentId.isNotBlank() && folder.parentId in byId) {
+            childrenByParent.getOrPut(folder.parentId) { mutableListOf() }.add(folder.id)
+        }
+    }
+
+    fun collectSubtreeIds(rootId: String): Set<String> {
+        val result = linkedSetOf<String>()
+        val stack = ArrayDeque<String>()
+        stack.addLast(rootId)
+        while (stack.isNotEmpty()) {
+            val cur = stack.removeLast()
+            if (!result.add(cur)) continue
+            childrenByParent[cur]?.forEach { childId -> stack.addLast(childId) }
+        }
+        return result
+    }
+
+    return folders.map { folder ->
+        if (childrenByParent[folder.id].isNullOrEmpty()) return@map folder
+        val subtreeIds = collectSubtreeIds(folder.id)
+        if (!subtreeIds.all { it in messagesByFolder }) return@map folder
+
+        val anyReadByKey = mutableMapOf<String, Boolean>()
+        var extraTotal = 0
+        var extraUnread = 0
+        for (sid in subtreeIds) {
+            val (list, includesLast) = messagesByFolder[sid] ?: continue
+            for (item in list) {
+                val prev = anyReadByKey[item.dedupKey]
+                anyReadByKey[item.dedupKey] = (prev == true) || item.isRead
+            }
+            if (!includesLast) {
+                val raw = byId[sid]
+                if (raw != null) {
+                    // shortcut: deduplicates up to 500 items per folder; overflow beyond 500 adds raw remainder
+                    extraTotal += (raw.totalCount - list.size).coerceAtLeast(0)
+                    extraUnread += (raw.unreadCount - list.count { !it.isRead }).coerceAtLeast(0)
+                }
+            }
+        }
+        val uniqueTotal = anyReadByKey.size + extraTotal
+        val uniqueUnread = anyReadByKey.values.count { !it } + extraUnread
+        folder.copy(totalCount = uniqueTotal, unreadCount = uniqueUnread)
     }
 }
 

@@ -876,8 +876,31 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         toastMessage = if (isRead) "Отмечены прочитанными" else "Отмечены непрочитанными"
                     )
                 }
+                refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
+            }
+        }
+    }
+
+    private fun refreshSubtreeFoldersIfNested(c: EwsClient, folderId: String?) {
+        if (folderId.isNullOrBlank()) return
+        val folders = _state.value.folders
+        val byId = folders.associateBy { it.id }
+        val folder = byId[folderId] ?: return
+        val hasParent = folder.parentId.isNotBlank() && folder.parentId in byId
+        val hasChild = folders.any { it.parentId == folder.id }
+        if (!hasParent && !hasChild) return
+
+        viewModelScope.launch {
+            val updated = runCatching { c.getFolders() }.getOrNull() ?: return@launch
+            _state.update { st ->
+                st.copy(
+                    folders = updated,
+                    currentFolder = st.currentFolder?.let { cur ->
+                        updated.firstOrNull { it.id == cur.id } ?: cur
+                    }
+                )
             }
         }
     }
@@ -984,6 +1007,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         toastMessage = if (next) "Отмечено прочитанным" else "Отмечено непрочитанным"
                     )
                 }
+                refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
             }
@@ -1186,6 +1210,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         screen = Screen.MessageDetail
                     )
                 }
+                if (markedRead) {
+                    refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
+                }
             } catch (e: Exception) {
                 _state.update {
                     it.copy(
@@ -1257,6 +1284,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         toastMessage = if (newState) "Отмечено как прочитанное" else "Отмечено как непрочитанное"
                     )
                 }
+                refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Ошибка обновления статуса") }
             }
