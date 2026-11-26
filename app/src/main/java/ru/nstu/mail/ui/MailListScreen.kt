@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MoveToInbox
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Outbox
 import androidx.compose.material.icons.filled.People
@@ -115,6 +116,7 @@ import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.extractSubjectTagHierarchies
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseTagPath
@@ -360,13 +362,50 @@ fun MailListScreen(
                     HorizontalDivider()
                     Spacer(Modifier.height(6.dp))
 
+                    val unsortedFolder = state.folders.firstOrNull {
+                        !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+                    }
                     val deletedFolder = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }
                     val systemFolders = state.folders.filter {
                         it.isSystem && it.systemKind != SystemFolderKind.DELETED
                     }
-                    val customFolders = state.folders.filterNot { it.isSystem }
+                    val customFolders = state.folders.filterNot {
+                        it.isSystem || it.id == unsortedFolder?.id
+                    }
 
+                    @Composable
+                    fun renderUnsortedItem(folder: MailFolder) {
+                        DrawerFolderItem(
+                            folder = folder.copy(depth = 0),
+                            selected = state.currentFolder?.id == folder.id,
+                            notificationsMuted = isFolderMuted(folder),
+                            onSelect = {
+                                scope.launch { drawerState.close() }
+                                onSelectFolder(folder)
+                            },
+                            onToggleNotifications = {
+                                scope.launch { drawerState.close() }
+                                onToggleFolderNotifications(folder)
+                            },
+                            onSetupAutoSort = {
+                                scope.launch { drawerState.close() }
+                                quickRuleFolder = folder
+                            },
+                            onCreateSubfolder = {
+                                scope.launch { drawerState.close() }
+                                createFolderParent = true to folder
+                            },
+                            onRename = null,
+                            onDelete = null
+                        )
+                    }
+
+                    var unsortedRendered = false
                     systemFolders.forEach { folder ->
+                        if (unsortedFolder != null && !unsortedRendered && folder.systemKind != SystemFolderKind.INBOX) {
+                            renderUnsortedItem(unsortedFolder)
+                            unsortedRendered = true
+                        }
                         DrawerFolderItem(
                             folder = folder,
                             selected = state.currentFolder?.id == folder.id,
@@ -390,6 +429,13 @@ fun MailListScreen(
                             onRename = null,
                             onDelete = null
                         )
+                        if (unsortedFolder != null && !unsortedRendered && folder.systemKind == SystemFolderKind.INBOX) {
+                            renderUnsortedItem(unsortedFolder)
+                            unsortedRendered = true
+                        }
+                    }
+                    if (unsortedFolder != null && !unsortedRendered) {
+                        renderUnsortedItem(unsortedFolder)
                     }
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
@@ -1656,5 +1702,9 @@ private fun folderIcon(folder: MailFolder) = when (folder.systemKind) {
     SystemFolderKind.OUTBOX -> Icons.Default.Outbox
     SystemFolderKind.DELETED -> Icons.Default.Delete
     SystemFolderKind.JUNK -> Icons.Default.Report
-    null -> Icons.Default.Folder
+    null -> if (folder.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)) {
+        Icons.Default.MoveToInbox
+    } else {
+        Icons.Default.Folder
+    }
 }

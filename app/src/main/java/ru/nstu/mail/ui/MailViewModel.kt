@@ -51,6 +51,7 @@ import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
@@ -422,7 +423,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             try {
-                val folders = newClient.getFolders()
+                val folders = ensureUnsortedFolder(newClient, newClient.getFolders())
                 val inbox = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
                     ?: folders.firstOrNull()
                 val (items, includesLast) = if (inbox != null) {
@@ -560,7 +561,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             try {
-                val folders = if (reset) c.getFolders() else _state.value.folders
+                val folders = if (reset) ensureUnsortedFolder(c, c.getFolders()) else _state.value.folders
                 val updatedCurrent = _state.value.currentFolder?.let { cur ->
                     folders.firstOrNull { it.id == cur.id } ?: cur
                 } ?: folders.firstOrNull()
@@ -614,6 +615,19 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    private suspend fun ensureUnsortedFolder(
+        c: EwsClient,
+        folders: List<MailFolder>
+    ): List<MailFolder> {
+        if (folders.any { !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true) }) {
+            return folders
+        }
+        return runCatching {
+            c.createFolder(UNSORTED_FOLDER_NAME, parentFolderId = null)
+            c.getFolders()
+        }.getOrDefault(folders)
     }
 
     fun createFolder(name: String, parentFolderId: String?) {
