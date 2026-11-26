@@ -1,5 +1,6 @@
 package ru.nstu.mail.desktop
 
+import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,7 +9,11 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -21,12 +26,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -51,6 +60,7 @@ import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.MarkEmailUnread
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MoveToInbox
 import androidx.compose.material.icons.filled.Notifications
@@ -109,11 +119,13 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
@@ -130,6 +142,7 @@ import ru.nstu.mail.data.EmailParticipant
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
@@ -150,11 +163,14 @@ import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
 import ru.nstu.mail.data.splitEmails
 import java.awt.BorderLayout
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import java.io.File
 import javax.swing.JEditorPane
 import javax.swing.JFileChooser
 import javax.swing.JPanel
 import javax.swing.JScrollPane
+import javax.swing.ScrollPaneConstants
 import javax.swing.SwingUtilities
 import javax.swing.event.HyperlinkEvent
 
@@ -167,6 +183,7 @@ fun DesktopRootScreen(
     val avatars by controller.avatars.collectAsState()
     val profiles by controller.personProfiles.collectAsState()
     val knownNames by controller.knownNames.collectAsState()
+    val loadingProfiles by controller.loadingProfiles.collectAsState()
 
     LaunchedEffect(state.toastMessage) {
         val msg = state.toastMessage ?: return@LaunchedEffect
@@ -179,7 +196,7 @@ fun DesktopRootScreen(
             onDismissRequest = controller::dismissUpdate,
             title = { Text("Доступно обновление ${upd.tagName}") },
             text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Column(modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                     Text(
                         text = if (upd.isPrerelease) "Тестовая сборка (${upd.assetName})" else "Стабильная сборка",
                         style = MaterialTheme.typography.labelMedium,
@@ -213,7 +230,9 @@ fun DesktopRootScreen(
                     state = state,
                     avatars = avatars,
                     profiles = profiles,
-                    knownNames = knownNames
+                    knownNames = knownNames,
+                    loadingProfiles = loadingProfiles,
+                    hasRootOverlay = state.availableUpdate != null
                 )
             }
         }
@@ -292,23 +311,28 @@ private fun DesktopLoginPane(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DesktopWorkspace(
     controller: DesktopMailController,
     state: DesktopUiState,
     avatars: Map<String, ImageBitmap?>,
     profiles: Map<String, PersonProfile?>,
-    knownNames: Map<String, String>
+    knownNames: Map<String, String>,
+    loadingProfiles: Set<String>,
+    hasRootOverlay: Boolean
 ) {
     var otherExpanded by remember { mutableStateOf(false) }
+    var sidebarVisibleCompact by remember { mutableStateOf(true) }
     var createFolderParent by remember { mutableStateOf<Pair<Boolean, MailFolder?>>(false to null) }
     var renameTarget by remember { mutableStateOf<MailFolder?>(null) }
     var deleteFolderTarget by remember { mutableStateOf<MailFolder?>(null) }
-    var quickRuleFolder by remember { mutableStateOf<MailFolder?>(null) }
-    var showRulesDialog by remember { mutableStateOf(false) }
     var confirmEmptyFolder by remember { mutableStateOf(false) }
     var moveMessageTarget by remember { mutableStateOf<EmailDetail?>(null) }
+    var selectedPerson by remember { mutableStateOf<EmailParticipant?>(null) }
     var topFolderMenuOpen by remember { mutableStateOf(false) }
+    var openFolderMenuCount by remember { mutableStateOf(0) }
+    var detailOverlayOpen by remember { mutableStateOf(false) }
     var searchDraft by remember(state.searchQuery) { mutableStateOf(state.searchQuery) }
 
     fun isMuted(f: MailFolder?): Boolean {
@@ -316,6 +340,17 @@ private fun DesktopWorkspace(
         val muted = state.settings.mutedFolderIds
         return f.id in muted || (f.systemKind == SystemFolderKind.INBOX && "inbox" in muted)
     }
+
+    val anyOverlayOpen = hasRootOverlay ||
+        createFolderParent.first ||
+        renameTarget != null ||
+        deleteFolderTarget != null ||
+        confirmEmptyFolder ||
+        moveMessageTarget != null ||
+        selectedPerson != null ||
+        topFolderMenuOpen ||
+        openFolderMenuCount > 0 ||
+        detailOverlayOpen
 
     if (createFolderParent.first) {
         FolderNameDialog(
@@ -359,37 +394,6 @@ private fun DesktopWorkspace(
         )
     }
 
-    quickRuleFolder?.let { target ->
-        AddTagRuleDialog(
-            folders = state.folders,
-            tagTemplates = state.settings.tagTemplates,
-            rules = state.settings.tagSortRules,
-            fixedFolder = target,
-            initialTag = null,
-            onDismiss = { quickRuleFolder = null },
-            onConfirm = { tag, chosen, autoSub ->
-                quickRuleFolder = null
-                controller.saveTagSortRule(tag, chosen, autoSub)
-            },
-            onRemoveRule = { tag ->
-                quickRuleFolder = null
-                controller.removeTagSortRule(tag)
-            }
-        )
-    }
-
-    if (showRulesDialog) {
-        TagRulesTreeDialog(
-            folders = state.folders,
-            rules = state.settings.tagSortRules,
-            tagTemplates = state.settings.tagTemplates,
-            mutedFolderIds = state.settings.mutedFolderIds,
-            onSaveRule = controller::saveTagSortRule,
-            onRemoveRule = controller::removeTagSortRule,
-            onDismiss = { showRulesDialog = false }
-        )
-    }
-
     if (confirmEmptyFolder && state.currentFolder != null) {
         AlertDialog(
             onDismissRequest = { confirmEmptyFolder = false },
@@ -416,7 +420,7 @@ private fun DesktopWorkspace(
                             modifier = Modifier.fillMaxWidth().clickable {
                                 moveMessageTarget = null
                                 controller.moveDetail(msg, f)
-                            }.padding(start = (6 + f.depth * 14).dp, top = 8.dp, bottom = 8.dp),
+                            }.padding(start = (6 + minOf(f.depth, 4) * 12).dp, top = 8.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(folderIcon(f), null, modifier = Modifier.size(18.dp))
@@ -431,360 +435,453 @@ private fun DesktopWorkspace(
         )
     }
 
-    Row(modifier = Modifier.fillMaxSize()) {
-        // --- 1. Left Sidebar ---
-        Column(
-            modifier = Modifier
-                .width(260.dp)
-                .fillMaxHeight()
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f))
-                .verticalScroll(rememberScrollState())
-                .padding(8.dp)
-        ) {
-            val userEmail = state.credentials?.email.orEmpty()
-            val userKey = userEmail.trim().lowercase()
-            val userName = resolveDisplayName("", userEmail, profiles[userKey], knownNames)
-            Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                DesktopAvatar(userName, userEmail, avatars[userKey], 40.dp, controller::requestAvatar)
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Почта НГТУ", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(userName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    selectedPerson?.let { person ->
+        val pkey = person.email.trim().lowercase().ifBlank { person.name.trim().lowercase() }
+        val prof = profiles[pkey]
+        val fullName = resolveDisplayName(person.name, person.email, prof, knownNames)
+        val dialogEmail = prof?.email?.takeIf { it.isNotBlank() } ?: person.email
+        val fromMuted = dialogEmail.trim().lowercase() in state.settings.mutedSenders
+        DesktopPersonInfoDialog(
+            participant = person,
+            photo = avatars[person.email.trim().lowercase()],
+            profile = prof,
+            knownNames = knownNames,
+            isLoadingProfile = pkey in loadingProfiles,
+            notificationsMuted = fromMuted,
+            onToggleNotifications = {
+                if (dialogEmail.isNotBlank()) controller.toggleSenderNotifications(dialogEmail)
+            },
+            onRequestProfile = { controller.requestPersonProfile(person.name, person.email) },
+            onRequestAvatar = controller::requestAvatar,
+            onCompose = {
+                selectedPerson = null
+                if (dialogEmail.isNotBlank()) controller.openCompose(prefillTo = dialogEmail, prefillName = fullName)
+            },
+            onCopyEmail = { emailToCopy ->
+                runCatching {
+                    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(emailToCopy), null)
                 }
-            }
-            Spacer(Modifier.height(6.dp))
-            Button(
-                onClick = { controller.openCompose() },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-            ) {
-                Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Написать письмо")
-            }
-            Spacer(Modifier.height(8.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(6.dp))
+                controller.showToast("Адрес скопирован: $emailToCopy")
+            },
+            onDismiss = { selectedPerson = null }
+        )
+    }
 
-            val unsortedFolder = state.folders.firstOrNull { !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, true) }
-            val deletedFolder = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }
-            val systemFolders = state.folders.filter { it.isSystem && it.systemKind != SystemFolderKind.DELETED }
-            val customFolders = state.folders.filterNot { it.isSystem || it.id == unsortedFolder?.id }
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val compactMode = maxWidth < 860.dp
+        val mediumMode = maxWidth < 1120.dp
+        val sidebarWidth = when {
+            compactMode -> 205.dp
+            mediumMode -> 225.dp
+            else -> 255.dp
+        }
+        val mailListWidth = when {
+            mediumMode -> 300.dp
+            else -> 350.dp
+        }
+        val showSidebar = !compactMode || sidebarVisibleCompact
+        val showRightOnlyInCompact = compactMode && state.rightPane !is DesktopRightPane.Empty
 
-            var unsortedDone = false
-            systemFolders.forEach { folder ->
-                if (unsortedFolder != null && !unsortedDone && folder.systemKind != SystemFolderKind.INBOX) {
-                    SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder),
-                        onSelect = { controller.selectFolder(unsortedFolder) },
-                        onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
-                        onAutoSort = { quickRuleFolder = unsortedFolder },
-                        onCreateSub = { createFolderParent = true to unsortedFolder }
-                    )
-                    unsortedDone = true
-                }
-                SidebarFolderRow(folder, state.currentFolder?.id == folder.id, isMuted(folder),
-                    onSelect = { controller.selectFolder(folder) },
-                    onToggleMute = { controller.toggleFolderNotifications(folder) },
-                    onAutoSort = { quickRuleFolder = folder },
-                    onCreateSub = { createFolderParent = true to folder }
-                )
-                if (unsortedFolder != null && !unsortedDone && folder.systemKind == SystemFolderKind.INBOX) {
-                    SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder),
-                        onSelect = { controller.selectFolder(unsortedFolder) },
-                        onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
-                        onAutoSort = { quickRuleFolder = unsortedFolder },
-                        onCreateSub = { createFolderParent = true to unsortedFolder }
-                    )
-                    unsortedDone = true
-                }
-            }
-            if (unsortedFolder != null && !unsortedDone) {
-                SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder),
-                    onSelect = { controller.selectFolder(unsortedFolder) },
-                    onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
-                    onAutoSort = { quickRuleFolder = unsortedFolder },
-                    onCreateSub = { createFolderParent = true to unsortedFolder }
-                )
-            }
+        Row(modifier = Modifier.fillMaxSize()) {
+            // --- 1. Left Sidebar ---
+            if (showSidebar) {
+                Column(
+                    modifier = Modifier
+                        .width(sidebarWidth)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f))
+                        .verticalScroll(rememberScrollState())
+                        .padding(8.dp)
+                ) {
+                    val userEmail = state.credentials?.email.orEmpty()
+                    val userKey = userEmail.trim().lowercase()
+                    val userName = resolveDisplayName("", userEmail, profiles[userKey], knownNames)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                if (userEmail.isNotBlank()) {
+                                    selectedPerson = EmailParticipant(userName, userEmail, ParticipantRole.FROM)
+                                }
+                            }
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        DesktopAvatar(userName, userEmail, avatars[userKey], 40.dp, controller::requestAvatar)
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Почта НГТУ", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(userName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Button(
+                        onClick = { controller.openCompose() },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                    ) {
+                        Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Написать письмо", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(6.dp))
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Пользовательские папки", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                IconButton(onClick = { createFolderParent = true to null }, modifier = Modifier.size(26.dp)) {
-                    Icon(Icons.Default.CreateNewFolder, contentDescription = "Новая папка", modifier = Modifier.size(16.dp))
-                }
-            }
-            if (customFolders.isEmpty()) {
-                Text("Нет своих папок", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(10.dp))
-            } else {
-                customFolders.forEach { folder ->
-                    SidebarFolderRow(folder, state.currentFolder?.id == folder.id, isMuted(folder),
-                        onSelect = { controller.selectFolder(folder) },
-                        onToggleMute = { controller.toggleFolderNotifications(folder) },
-                        onAutoSort = { quickRuleFolder = folder },
-                        onCreateSub = { createFolderParent = true to folder },
-                        onRename = { renameTarget = folder },
-                        onDelete = { deleteFolderTarget = folder }
-                    )
-                }
-            }
+                    val unsortedFolder = state.folders.firstOrNull { !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, true) }
+                    val deletedFolder = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }
+                    val systemFolders = state.folders.filter { it.isSystem && it.systemKind != SystemFolderKind.DELETED }
+                    val customFolders = state.folders.filterNot { it.isSystem || it.id == unsortedFolder?.id }
+                    val onMenuToggle: (Boolean) -> Unit = { opened ->
+                        openFolderMenuCount = (openFolderMenuCount + if (opened) 1 else -1).coerceAtLeast(0)
+                    }
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-            SidebarNavRow(
-                icon = if (otherExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                label = "Прочее",
-                selected = false,
-                onClick = { otherExpanded = !otherExpanded }
-            )
-            if (otherExpanded) {
-                Column(modifier = Modifier.padding(start = 12.dp)) {
-                    deletedFolder?.let { del ->
-                        SidebarFolderRow(del, state.currentFolder?.id == del.id, isMuted(del),
-                            onSelect = { controller.selectFolder(del) },
-                            onToggleMute = { controller.toggleFolderNotifications(del) },
-                            onAutoSort = { quickRuleFolder = del },
-                            onCreateSub = { createFolderParent = true to del }
+                    var unsortedDone = false
+                    systemFolders.forEach { folder ->
+                        if (unsortedFolder != null && !unsortedDone && folder.systemKind != SystemFolderKind.INBOX) {
+                            SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder), false,
+                                onSelect = { controller.selectFolder(unsortedFolder) },
+                                onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
+                                onAutoSort = null,
+                                onCreateSub = { createFolderParent = true to unsortedFolder },
+                                onMenuExpandedChanged = onMenuToggle
+                            )
+                            unsortedDone = true
+                        }
+                        SidebarFolderRow(folder, state.currentFolder?.id == folder.id, isMuted(folder), false,
+                            onSelect = { controller.selectFolder(folder) },
+                            onToggleMute = { controller.toggleFolderNotifications(folder) },
+                            onAutoSort = null,
+                            onCreateSub = { createFolderParent = true to folder },
+                            onMenuExpandedChanged = onMenuToggle
+                        )
+                        if (unsortedFolder != null && !unsortedDone && folder.systemKind == SystemFolderKind.INBOX) {
+                            SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder), false,
+                                onSelect = { controller.selectFolder(unsortedFolder) },
+                                onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
+                                onAutoSort = null,
+                                onCreateSub = { createFolderParent = true to unsortedFolder },
+                                onMenuExpandedChanged = onMenuToggle
+                            )
+                            unsortedDone = true
+                        }
+                    }
+                    if (unsortedFolder != null && !unsortedDone) {
+                        SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder), false,
+                            onSelect = { controller.selectFolder(unsortedFolder) },
+                            onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
+                            onAutoSort = null,
+                            onCreateSub = { createFolderParent = true to unsortedFolder },
+                            onMenuExpandedChanged = onMenuToggle
                         )
                     }
-                    SidebarNavRow(Icons.Default.People, "Контакты и адресная книга", state.rightPane is DesktopRightPane.Contacts, controller::openContacts)
-                    SidebarNavRow(Icons.Default.CalendarMonth, "Календарь", state.rightPane is DesktopRightPane.Calendar, controller::openCalendar)
-                }
-            }
-            SidebarNavRow(Icons.Default.Settings, "Настройки", state.rightPane is DesktopRightPane.Settings, controller::openSettings)
-            SidebarNavRow(Icons.AutoMirrored.Filled.Logout, "Выйти", false, controller::logout)
-        }
 
-        Box(modifier = Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Пользовательские папки", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { createFolderParent = true to null }, modifier = Modifier.size(26.dp)) {
+                            Icon(Icons.Default.CreateNewFolder, contentDescription = "Новая папка", modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    if (customFolders.isEmpty()) {
+                        Text("Нет своих папок", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(10.dp))
+                    } else {
+                        customFolders.forEach { folder ->
+                            val hasRule = state.settings.tagSortRules.any { it.targetFolderId == folder.id }
+                            SidebarFolderRow(folder, state.currentFolder?.id == folder.id, isMuted(folder), hasRule,
+                                onSelect = { controller.selectFolder(folder) },
+                                onToggleMute = { controller.toggleFolderNotifications(folder) },
+                                onAutoSort = { controller.enableAutoSortForFolderTree(folder) },
+                                onCreateSub = { createFolderParent = true to folder },
+                                onRename = { renameTarget = folder },
+                                onDelete = { deleteFolderTarget = folder },
+                                onMenuExpandedChanged = onMenuToggle
+                            )
+                        }
+                    }
 
-        // --- 2. Middle Mail List ---
-        Column(modifier = Modifier.width(360.dp).fillMaxHeight()) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(state.currentFolder?.displayName ?: "Почта", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Row {
-                    IconButton(onClick = { controller.refresh() }) { Icon(Icons.Default.Refresh, "Обновить") }
-                    Box {
-                        IconButton(onClick = { topFolderMenuOpen = true }) { Icon(Icons.Default.MoreVert, "Меню папки") }
-                        DropdownMenu(expanded = topFolderMenuOpen, onDismissRequest = { topFolderMenuOpen = false }) {
-                            state.currentFolder?.let { cur ->
-                                DropdownMenuItem(
-                                    text = { Text(if (isMuted(cur)) "Уведомления: выкл (вкл.)" else "Уведомления: вкл (выкл.)") },
-                                    onClick = { topFolderMenuOpen = false; controller.toggleFolderNotifications(cur) }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+                    SidebarNavRow(
+                        icon = if (otherExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        label = "Прочее",
+                        selected = false,
+                        onClick = { otherExpanded = !otherExpanded }
+                    )
+                    if (otherExpanded) {
+                        Column(modifier = Modifier.padding(start = 12.dp)) {
+                            deletedFolder?.let { del ->
+                                SidebarFolderRow(del, state.currentFolder?.id == del.id, isMuted(del), false,
+                                    onSelect = { controller.selectFolder(del) },
+                                    onToggleMute = { controller.toggleFolderNotifications(del) },
+                                    onAutoSort = null,
+                                    onCreateSub = { createFolderParent = true to del },
+                                    onMenuExpandedChanged = onMenuToggle
                                 )
                             }
-                            DropdownMenuItem(text = { Text("Автосортировка по тегам") }, onClick = { topFolderMenuOpen = false; showRulesDialog = true })
-                            DropdownMenuItem(text = { Text("Отметить все прочитанными") }, onClick = { topFolderMenuOpen = false; controller.markAllReadInCurrentFolder() })
-                            DropdownMenuItem(text = { Text("Создать подпапку") }, onClick = { topFolderMenuOpen = false; createFolderParent = true to state.currentFolder })
-                            val canEmpty = state.currentFolder?.systemKind == SystemFolderKind.DELETED || state.currentFolder?.systemKind == SystemFolderKind.JUNK
-                            if (canEmpty) {
-                                DropdownMenuItem(text = { Text("Очистить папку") }, onClick = { topFolderMenuOpen = false; confirmEmptyFolder = true })
+                            SidebarNavRow(Icons.Default.People, "Контакты и адресная книга", state.rightPane is DesktopRightPane.Contacts, controller::openContacts)
+                            SidebarNavRow(Icons.Default.CalendarMonth, "Календарь", state.rightPane is DesktopRightPane.Calendar, controller::openCalendar)
+                        }
+                    }
+                    SidebarNavRow(Icons.Default.Settings, "Настройки", state.rightPane is DesktopRightPane.Settings, controller::openSettings)
+                    SidebarNavRow(Icons.AutoMirrored.Filled.Logout, "Выйти", false, controller::logout)
+                }
+                Box(modifier = Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
+            }
+
+            // --- 2. Middle Mail List ---
+            if (!showRightOnlyInCompact) {
+                Column(modifier = if (compactMode) Modifier.weight(1f).fillMaxHeight() else Modifier.width(mailListWidth).fillMaxHeight()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            if (compactMode) {
+                                IconButton(onClick = { sidebarVisibleCompact = !sidebarVisibleCompact }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Menu, "Папки")
+                                }
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            Text(state.currentFolder?.displayName ?: "Почта", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Row {
+                            IconButton(onClick = { controller.refresh() }) { Icon(Icons.Default.Refresh, "Обновить") }
+                            Box {
+                                IconButton(onClick = { topFolderMenuOpen = true }) { Icon(Icons.Default.MoreVert, "Меню папки") }
+                                DropdownMenu(expanded = topFolderMenuOpen, onDismissRequest = { topFolderMenuOpen = false }) {
+                                    state.currentFolder?.let { cur ->
+                                        DropdownMenuItem(
+                                            text = { Text(if (isMuted(cur)) "Уведомления: выкл (вкл.)" else "Уведомления: вкл (выкл.)") },
+                                            onClick = { topFolderMenuOpen = false; controller.toggleFolderNotifications(cur) }
+                                        )
+                                        if (!cur.isSystem && !cur.displayName.equals(UNSORTED_FOLDER_NAME, true)) {
+                                            DropdownMenuItem(
+                                                text = { Text("Автосортировка по дереву папки") },
+                                                onClick = { topFolderMenuOpen = false; controller.enableAutoSortForFolderTree(cur) }
+                                            )
+                                        }
+                                    }
+                                    DropdownMenuItem(text = { Text("Отметить все прочитанными") }, onClick = { topFolderMenuOpen = false; controller.markAllReadInCurrentFolder() })
+                                    DropdownMenuItem(text = { Text("Создать подпапку") }, onClick = { topFolderMenuOpen = false; createFolderParent = true to state.currentFolder })
+                                    val canEmpty = state.currentFolder?.systemKind == SystemFolderKind.DELETED || state.currentFolder?.systemKind == SystemFolderKind.JUNK
+                                    if (canEmpty) {
+                                        DropdownMenuItem(text = { Text("Очистить папку") }, onClick = { topFolderMenuOpen = false; confirmEmptyFolder = true })
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
 
-            OutlinedTextField(
-                value = searchDraft,
-                onValueChange = { searchDraft = it },
-                placeholder = { Text("Поиск…") },
-                singleLine = true,
-                leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(18.dp)) },
-                trailingIcon = {
-                    if (searchDraft.isNotEmpty() || state.searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchDraft = ""; controller.search("") }) {
-                            Icon(Icons.Default.Close, "Очистить", modifier = Modifier.size(16.dp))
-                        }
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .onPreviewKeyEvent { ev ->
-                        if (ev.key == Key.Enter) {
-                            controller.search(searchDraft)
-                            true
-                        } else false
-                    }
-            )
-
-            val hasChildren = remember(state.folders, state.currentFolder?.id) {
-                val curId = state.currentFolder?.id
-                curId != null && state.folders.any { it.parentId == curId }
-            }
-            val folderTagLabel = remember(state.currentFolder?.id, state.currentFolder?.displayName, state.settings.tagSortRules) {
-                val curId = state.currentFolder?.id
-                state.settings.tagSortRules.firstOrNull { it.targetFolderId == curId }?.pathSegments()?.lastOrNull()
-                    ?: state.currentFolder?.displayName.orEmpty()
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (state.searchQuery.isNotBlank()) {
-                    FilterChip(selected = state.searchAllFolders, onClick = { controller.setSearchAllFolders(!state.searchAllFolders) }, label = { Text("Во всех папках") })
-                }
-                MailFilter.entries.forEach { f ->
-                    val isAll = f == MailFilter.ALL
-                    FilterChip(
-                        selected = if (isAll && hasChildren) state.filter == f && state.includeSubfoldersInFolder else state.filter == f,
-                        onClick = {
-                            if (isAll && !state.includeSubfoldersInFolder && state.filter == MailFilter.ALL) {
-                                controller.setIncludeSubfolders(true)
-                            } else {
-                                controller.setFilter(f)
+                    OutlinedTextField(
+                        value = searchDraft,
+                        onValueChange = { searchDraft = it },
+                        placeholder = { Text("Поиск…") },
+                        singleLine = true,
+                        leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(18.dp)) },
+                        trailingIcon = {
+                            if (searchDraft.isNotEmpty() || state.searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchDraft = ""; controller.search("") }) {
+                                    Icon(Icons.Default.Close, "Очистить", modifier = Modifier.size(16.dp))
+                                }
                             }
                         },
-                        label = { Text(f.labelRu) }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .onPreviewKeyEvent { ev ->
+                                if (ev.key == Key.Enter) {
+                                    controller.search(searchDraft)
+                                    true
+                                } else false
+                            }
                     )
-                    if (isAll && hasChildren) {
-                        FilterChip(
-                            selected = !state.includeSubfoldersInFolder,
-                            onClick = { controller.setIncludeSubfolders(!state.includeSubfoldersInFolder) },
-                            label = { Text("Только с «$folderTagLabel» тегом") }
-                        )
-                    }
-                }
-            }
 
-            if (state.isLoading || state.isRefreshing) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-
-            if (state.messages.isEmpty() && !state.isLoading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = if (state.searchQuery.isBlank() && state.filter == MailFilter.ALL) "В папке нет писем" else "Ничего не найдено",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(state.messages, key = { it.id }) { item ->
-                        val skey = item.senderEmail.trim().lowercase()
-                        val displayName = resolveDisplayName(item.senderName, item.senderEmail, profiles[skey], knownNames)
-                        val isOpen = state.rightPane is DesktopRightPane.MessageDetail && state.selectedMessage?.id == item.id
-                        DesktopEmailListItem(
-                            item = item,
-                            displaySender = displayName,
-                            photo = avatars[skey],
-                            selected = isOpen,
-                            onRequestAvatar = controller::requestAvatar,
-                            onClick = { controller.openMessage(item) },
-                            onToggleFlag = { controller.toggleFlagSummary(item) }
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    val hasChildren = remember(state.folders, state.currentFolder?.id) {
+                        val curId = state.currentFolder?.id
+                        curId != null && state.folders.any { it.parentId == curId }
                     }
-                    if (!state.reachedEnd) {
-                        item {
-                            Box(modifier = Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
-                                OutlinedButton(onClick = controller::loadMore, enabled = !state.isLoading) { Text("Загрузить ещё") }
+                    val folderTagLabel = remember(state.currentFolder?.id, state.currentFolder?.displayName, state.settings.tagSortRules) {
+                        val curId = state.currentFolder?.id
+                        state.settings.tagSortRules.firstOrNull { it.targetFolderId == curId }?.pathSegments()?.lastOrNull()
+                            ?: state.currentFolder?.displayName.orEmpty()
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (state.searchQuery.isNotBlank()) {
+                            FilterChip(selected = state.searchAllFolders, onClick = { controller.setSearchAllFolders(!state.searchAllFolders) }, label = { Text("Во всех папках") })
+                        }
+                        MailFilter.entries.forEach { f ->
+                            val isAll = f == MailFilter.ALL
+                            FilterChip(
+                                selected = if (isAll && hasChildren) state.filter == f && state.includeSubfoldersInFolder else state.filter == f,
+                                onClick = {
+                                    if (isAll && !state.includeSubfoldersInFolder && state.filter == MailFilter.ALL) {
+                                        controller.setIncludeSubfolders(true)
+                                    } else {
+                                        controller.setFilter(f)
+                                    }
+                                },
+                                label = { Text(f.labelRu) }
+                            )
+                            if (isAll && hasChildren) {
+                                FilterChip(
+                                    selected = !state.includeSubfoldersInFolder,
+                                    onClick = { controller.setIncludeSubfolders(!state.includeSubfoldersInFolder) },
+                                    label = { Text("Только с «$folderTagLabel» тегом") }
+                                )
+                            }
+                        }
+                    }
+
+                    if (state.isLoading || state.isRefreshing) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+
+                    if (state.messages.isEmpty() && !state.isLoading) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = if (state.searchQuery.isBlank() && state.filter == MailFilter.ALL) "В папке нет писем" else "Ничего не найдено",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(state.messages, key = { it.id }) { item ->
+                                val skey = item.senderEmail.trim().lowercase()
+                                val displayName = resolveDisplayName(item.senderName, item.senderEmail, profiles[skey], knownNames)
+                                val isOpen = state.rightPane is DesktopRightPane.MessageDetail && state.selectedMessage?.id == item.id
+                                DesktopEmailListItem(
+                                    item = item,
+                                    displaySender = displayName,
+                                    photo = avatars[skey],
+                                    selected = isOpen,
+                                    onRequestAvatar = controller::requestAvatar,
+                                    onAvatarClick = {
+                                        selectedPerson = EmailParticipant(displayName, item.senderEmail, ParticipantRole.FROM)
+                                    },
+                                    onClick = { controller.openMessage(item) },
+                                    onToggleFlag = { controller.toggleFlagSummary(item) }
+                                )
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            }
+                            if (!state.reachedEnd) {
+                                item {
+                                    Box(modifier = Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                                        OutlinedButton(onClick = controller::loadMore, enabled = !state.isLoading) { Text("Загрузить ещё") }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
-        }
-
-        Box(modifier = Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
-
-        // --- 3. Right Pane ---
-        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-            when (val pane = state.rightPane) {
-                DesktopRightPane.Empty -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("Выберите письмо для чтения", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                if (!compactMode) {
+                    Box(modifier = Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
                 }
-                DesktopRightPane.MessageDetail -> {
-                    val detail = state.selectedMessage
-                    if (detail != null) {
-                        val isDark = when (state.settings.themeMode) {
-                            DesktopThemeMode.SYSTEM -> isSystemInDarkTheme()
-                            DesktopThemeMode.LIGHT -> false
-                            DesktopThemeMode.DARK -> true
+            }
+
+            // --- 3. Right Pane ---
+            if (!compactMode || showRightOnlyInCompact) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    when (val pane = state.rightPane) {
+                        DesktopRightPane.Empty -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("Выберите письмо для чтения", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
-                        DesktopMessageDetailPane(
-                            detail = detail,
-                            currentFolder = state.currentFolder,
-                            avatars = avatars,
-                            profiles = profiles,
-                            knownNames = knownNames,
-                            mutedSenders = state.settings.mutedSenders,
-                            darkTheme = isDark,
-                            defaultLightBody = state.settings.alwaysLightEmailBody,
-                            onRequestAvatar = controller::requestAvatar,
-                            onRequestProfile = controller::requestPersonProfile,
-                            onToggleSenderMuted = controller::toggleSenderNotifications,
-                            onComposeTo = { e, n -> controller.openCompose(prefillTo = e, prefillName = n) },
-                            onToggleRead = { controller.toggleReadDetail(detail) },
-                            onToggleFlag = { controller.toggleFlagDetail(detail) },
-                            onReply = { controller.openCompose(replyTo = detail) },
-                            onReplyAll = { controller.openCompose(replyTo = detail, replyAll = true) },
-                            onForward = { controller.openCompose(replyTo = detail, isForward = true) },
-                            onMove = { moveMessageTarget = detail },
-                            onToggleSpam = { controller.toggleSpamDetail(detail) },
-                            onDelete = { controller.deleteDetail(detail) },
-                            onDownloadAttachment = controller::downloadAttachment,
-                            onOpenUrl = controller::openExternalUrl
+                        DesktopRightPane.MessageDetail -> {
+                            val detail = state.selectedMessage
+                            if (detail != null) {
+                                val isDark = when (state.settings.themeMode) {
+                                    DesktopThemeMode.SYSTEM -> isSystemInDarkTheme()
+                                    DesktopThemeMode.LIGHT -> false
+                                    DesktopThemeMode.DARK -> true
+                                }
+                                DesktopMessageDetailPane(
+                                    detail = detail,
+                                    currentFolder = state.currentFolder,
+                                    avatars = avatars,
+                                    profiles = profiles,
+                                    knownNames = knownNames,
+                                    showCompactBack = showRightOnlyInCompact,
+                                    parentOverlayOpen = anyOverlayOpen,
+                                    onOverlayChanged = { detailOverlayOpen = it },
+                                    onBackCompact = controller::closeRightPane,
+                                    onRequestAvatar = controller::requestAvatar,
+                                    onRequestProfile = controller::requestPersonProfile,
+                                    onSelectPerson = { selectedPerson = it },
+                                    onToggleRead = { controller.toggleReadDetail(detail) },
+                                    onToggleFlag = { controller.toggleFlagDetail(detail) },
+                                    onReply = { controller.openCompose(replyTo = detail) },
+                                    onReplyAll = { controller.openCompose(replyTo = detail, replyAll = true) },
+                                    onForward = { controller.openCompose(replyTo = detail, isForward = true) },
+                                    onMove = { moveMessageTarget = detail },
+                                    onToggleSpam = { controller.toggleSpamDetail(detail) },
+                                    onDelete = { controller.deleteDetail(detail) },
+                                    onDownloadAttachment = controller::downloadAttachment,
+                                    onOpenUrl = controller::openExternalUrl,
+                                    darkTheme = isDark,
+                                    defaultLightBody = state.settings.alwaysLightEmailBody
+                                )
+                            }
+                        }
+                        is DesktopRightPane.Compose -> {
+                            DesktopComposePane(
+                                currentUserEmail = state.credentials?.email.orEmpty(),
+                                replyTo = pane.replyTo,
+                                replyAll = pane.replyAll,
+                                isForward = pane.isForward,
+                                draft = pane.draft,
+                                suggestions = state.directorySuggestions,
+                                profiles = profiles,
+                                knownNames = knownNames,
+                                tagTemplates = state.settings.tagTemplates,
+                                isSending = state.isSending,
+                                onCancel = controller::closeRightPane,
+                                onSearchDirectory = controller::searchDirectory,
+                                onClearSuggestions = controller::clearDirectorySuggestions,
+                                onAddTagTemplate = controller::addTagTemplate,
+                                onSubmit = controller::saveOrSendEmail
+                            )
+                        }
+                        DesktopRightPane.Contacts -> DesktopContactsPane(
+                            contacts = state.contacts,
+                            onClose = controller::closeRightPane,
+                            onAddContact = controller::addContact,
+                            onComposeTo = { e, n -> controller.openCompose(prefillTo = e, prefillName = n) }
+                        )
+                        DesktopRightPane.Calendar -> DesktopCalendarPane(
+                            events = state.calendarEvents,
+                            onClose = controller::closeRightPane,
+                            onRefresh = controller::openCalendar,
+                            onCreateEvent = controller::createCalendarEvent
+                        )
+                        DesktopRightPane.Settings -> DesktopSettingsPane(
+                            state = state,
+                            onClose = controller::closeRightPane,
+                            onSetThemeMode = controller::setThemeMode,
+                            onSetAlwaysLightBody = controller::setAlwaysLightEmailBody,
+                            onSetNotificationsEnabled = controller::setNotificationsEnabled,
+                            onUnmuteFolder = controller::unmuteFolderById,
+                            onUnmuteSender = controller::toggleSenderNotifications,
+                            onAddTagTemplate = controller::addTagTemplate,
+                            onUpdateTagTemplate = controller::updateTagTemplate,
+                            onRemoveTagTemplate = controller::removeTagTemplate,
+                            onSaveTagSortRule = controller::saveTagSortRule,
+                            onRemoveTagSortRule = controller::removeTagSortRule,
+                            onDeployTagHierarchy = controller::deployTagHierarchyToFolders,
+                            onSetUpdateChannel = controller::setUpdateChannel,
+                            onCheckUpdates = { controller.checkForUpdates(manual = true) }
                         )
                     }
                 }
-                is DesktopRightPane.Compose -> {
-                    DesktopComposePane(
-                        currentUserEmail = state.credentials?.email.orEmpty(),
-                        replyTo = pane.replyTo,
-                        replyAll = pane.replyAll,
-                        isForward = pane.isForward,
-                        draft = pane.draft,
-                        suggestions = state.directorySuggestions,
-                        profiles = profiles,
-                        knownNames = knownNames,
-                        tagTemplates = state.settings.tagTemplates,
-                        isSending = state.isSending,
-                        onCancel = controller::closeRightPane,
-                        onSearchDirectory = controller::searchDirectory,
-                        onClearSuggestions = controller::clearDirectorySuggestions,
-                        onAddTagTemplate = controller::addTagTemplate,
-                        onSubmit = controller::saveOrSendEmail
-                    )
-                }
-                DesktopRightPane.Contacts -> DesktopContactsPane(
-                    contacts = state.contacts,
-                    onClose = controller::closeRightPane,
-                    onAddContact = controller::addContact,
-                    onComposeTo = { e, n -> controller.openCompose(prefillTo = e, prefillName = n) }
-                )
-                DesktopRightPane.Calendar -> DesktopCalendarPane(
-                    events = state.calendarEvents,
-                    onClose = controller::closeRightPane,
-                    onRefresh = controller::openCalendar,
-                    onCreateEvent = controller::createCalendarEvent
-                )
-                DesktopRightPane.Settings -> DesktopSettingsPane(
-                    state = state,
-                    onClose = controller::closeRightPane,
-                    onSetThemeMode = controller::setThemeMode,
-                    onSetAlwaysLightBody = controller::setAlwaysLightEmailBody,
-                    onSetNotificationsEnabled = controller::setNotificationsEnabled,
-                    onUnmuteFolder = controller::unmuteFolderById,
-                    onUnmuteSender = controller::toggleSenderNotifications,
-                    onAddTagTemplate = controller::addTagTemplate,
-                    onUpdateTagTemplate = controller::updateTagTemplate,
-                    onRemoveTagTemplate = controller::removeTagTemplate,
-                    onSaveTagSortRule = controller::saveTagSortRule,
-                    onRemoveTagSortRule = controller::removeTagSortRule,
-                    onDeployTagHierarchy = controller::deployTagHierarchyToFolders,
-                    onSetUpdateChannel = controller::setUpdateChannel,
-                    onCheckUpdates = { controller.checkForUpdates(manual = true) }
-                )
             }
         }
     }
@@ -818,30 +915,36 @@ private fun SidebarFolderRow(
     folder: MailFolder,
     selected: Boolean,
     muted: Boolean,
+    hasAutoSortRule: Boolean,
     onSelect: () -> Unit,
     onToggleMute: () -> Unit,
-    onAutoSort: () -> Unit,
+    onAutoSort: (() -> Unit)?,
     onCreateSub: () -> Unit,
     onRename: (() -> Unit)? = null,
-    onDelete: (() -> Unit)? = null
+    onDelete: (() -> Unit)? = null,
+    onMenuExpandedChanged: (Boolean) -> Unit = {}
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    androidx.compose.runtime.DisposableEffect(menuOpen) {
+        if (menuOpen) onMenuExpandedChanged(true)
+        onDispose { if (menuOpen) onMenuExpandedChanged(false) }
+    }
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = (folder.depth * 14).dp)
+            .padding(start = (minOf(folder.depth, 3) * 10).dp)
             .clip(RoundedCornerShape(8.dp))
             .background(bg)
             .clickable(onClick = onSelect)
-            .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+            .padding(start = 8.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(folderIcon(folder), null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
+        Icon(folderIcon(folder), null, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
         Text(folder.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         if (muted) {
-            Icon(Icons.Default.NotificationsOff, null, modifier = Modifier.size(14.dp).padding(end = 2.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+            Icon(Icons.Default.NotificationsOff, null, modifier = Modifier.size(13.dp).padding(end = 2.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
         }
         if (folder.totalCount > 0 || folder.unreadCount > 0) {
             val primary = MaterialTheme.colorScheme.primary
@@ -855,16 +958,25 @@ private fun SidebarFolderRow(
                     withStyle(SpanStyle(color = dim)) { append("/${folder.totalCount}") }
                 },
                 style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(horizontal = 4.dp)
+                modifier = Modifier.padding(horizontal = 3.dp)
             )
         }
+        if (onAutoSort != null) {
+            IconButton(onClick = onAutoSort, modifier = Modifier.size(22.dp)) {
+                Icon(
+                    Icons.AutoMirrored.Filled.DriveFileMove,
+                    contentDescription = "Автосортировка по дереву папки",
+                    tint = if (hasAutoSortRule) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
         Box {
-            IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(24.dp)) {
-                Icon(Icons.Default.MoreVert, null, modifier = Modifier.size(15.dp))
+            IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(22.dp)) {
+                Icon(Icons.Default.MoreVert, null, modifier = Modifier.size(14.dp))
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text(if (muted) "Уведомления: выкл (вкл.)" else "Уведомления: вкл (выкл.)") }, onClick = { menuOpen = false; onToggleMute() })
-                DropdownMenuItem(text = { Text("Автосортировка по тегу…") }, onClick = { menuOpen = false; onAutoSort() })
                 DropdownMenuItem(text = { Text("Создать подпапку") }, onClick = { menuOpen = false; onCreateSub() })
                 if (onRename != null) DropdownMenuItem(text = { Text("Переименовать") }, onClick = { menuOpen = false; onRename() })
                 if (onDelete != null) DropdownMenuItem(text = { Text("Удалить") }, onClick = { menuOpen = false; onDelete() })
@@ -880,6 +992,7 @@ private fun DesktopEmailListItem(
     photo: ImageBitmap?,
     selected: Boolean,
     onRequestAvatar: (String) -> Unit,
+    onAvatarClick: () -> Unit,
     onClick: () -> Unit,
     onToggleFlag: () -> Unit
 ) {
@@ -889,7 +1002,13 @@ private fun DesktopEmailListItem(
         modifier = Modifier.fillMaxWidth().background(bg).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.Top
     ) {
-        DesktopAvatar(displaySender, item.senderEmail, photo, 36.dp, onRequestAvatar)
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable(onClick = onAvatarClick)
+        ) {
+            DesktopAvatar(displaySender, item.senderEmail, photo, 36.dp, onRequestAvatar)
+        }
         Spacer(Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -930,6 +1049,7 @@ private fun DesktopEmailListItem(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DesktopMessageDetailPane(
     detail: EmailDetail,
@@ -937,13 +1057,13 @@ private fun DesktopMessageDetailPane(
     avatars: Map<String, ImageBitmap?>,
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
-    mutedSenders: Set<String>,
-    darkTheme: Boolean,
-    defaultLightBody: Boolean,
+    showCompactBack: Boolean,
+    parentOverlayOpen: Boolean,
+    onOverlayChanged: (Boolean) -> Unit,
+    onBackCompact: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestProfile: (String, String) -> Unit,
-    onToggleSenderMuted: (String) -> Unit,
-    onComposeTo: (String, String) -> Unit,
+    onSelectPerson: (EmailParticipant) -> Unit,
     onToggleRead: () -> Unit,
     onToggleFlag: () -> Unit,
     onReply: () -> Unit,
@@ -953,11 +1073,19 @@ private fun DesktopMessageDetailPane(
     onToggleSpam: () -> Unit,
     onDelete: () -> Unit,
     onDownloadAttachment: (ru.nstu.mail.data.AttachmentInfo, Boolean) -> Unit,
-    onOpenUrl: (String) -> Unit
+    onOpenUrl: (String) -> Unit,
+    darkTheme: Boolean,
+    defaultLightBody: Boolean
 ) {
     var forceLight by remember(detail.id, defaultLightBody) { mutableStateOf(defaultLightBody) }
     var confirmDelete by remember { mutableStateOf(false) }
-    var selectedPerson by remember { mutableStateOf<EmailParticipant?>(null) }
+
+    LaunchedEffect(confirmDelete) {
+        onOverlayChanged(confirmDelete)
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { onOverlayChanged(false) }
+    }
 
     if (confirmDelete) {
         AlertDialog(
@@ -970,58 +1098,44 @@ private fun DesktopMessageDetailPane(
         )
     }
 
-    selectedPerson?.let { person ->
-        val pkey = person.email.trim().lowercase()
-        val prof = profiles[pkey]
-        val fullName = resolveDisplayName(person.name, person.email, prof, knownNames)
-        val fromMuted = person.email.trim().lowercase() in mutedSenders
-        AlertDialog(
-            onDismissRequest = { selectedPerson = null },
-            title = { Text(fullName) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (person.email.isNotBlank()) Text(person.email, style = MaterialTheme.typography.bodySmall)
-                    prof?.jobTitle?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    prof?.department?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    if (person.email.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedButton(onClick = { onToggleSenderMuted(person.email) }) {
-                            Icon(if (fromMuted) Icons.Default.Notifications else Icons.Default.NotificationsOff, null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(if (fromMuted) "Включить уведомления от отправителя" else "Отключить уведомления от отправителя")
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                if (person.email.isNotBlank()) {
-                    TextButton(onClick = { selectedPerson = null; onComposeTo(person.email, fullName) }) { Text("Написать") }
-                }
-            },
-            dismissButton = { TextButton(onClick = { selectedPerson = null }) { Text("Закрыть") } }
-        )
+    val participants = remember(detail.id, detail.from, detail.fromEmail, detail.to, detail.cc, detail.bcc) {
+        detail.participants()
     }
+    val participantRowState = rememberLazyListState()
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                IconButton(onClick = onReply) { Icon(Icons.AutoMirrored.Filled.Reply, "Ответить") }
-                IconButton(onClick = onReplyAll) { Icon(Icons.AutoMirrored.Filled.ReplyAll, "Ответить всем") }
-                IconButton(onClick = onForward) { Icon(Icons.AutoMirrored.Filled.Forward, "Переслать") }
-                IconButton(onClick = onToggleRead) { Icon(if (detail.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead, "Статус прочтения") }
-                IconButton(onClick = onToggleFlag) { Icon(if (detail.isFlagged) Icons.Default.Star else Icons.Default.StarBorder, "Флажок") }
-                IconButton(onClick = onMove) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Переместить") }
-                IconButton(onClick = onToggleSpam) { Icon(if (currentFolder?.systemKind == SystemFolderKind.JUNK) Icons.Default.Inbox else Icons.Default.Report, "Спам") }
-                if (darkTheme) {
-                    IconButton(onClick = { forceLight = !forceLight }) { Icon(if (forceLight) Icons.Default.DarkMode else Icons.Default.LightMode, "Фон письма") }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                if (showCompactBack) {
+                    IconButton(onClick = onBackCompact, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", modifier = Modifier.size(20.dp))
+                    }
                 }
-                IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "Удалить") }
+                IconButton(onClick = onReply, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.Reply, "Ответить", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onReplyAll, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.ReplyAll, "Ответить всем", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onForward, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.Forward, "Переслать", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onToggleRead, modifier = Modifier.size(36.dp)) { Icon(if (detail.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead, "Статус прочтения", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onToggleFlag, modifier = Modifier.size(36.dp)) { Icon(if (detail.isFlagged) Icons.Default.Star else Icons.Default.StarBorder, "Флажок", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onMove, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Переместить", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onToggleSpam, modifier = Modifier.size(36.dp)) { Icon(if (currentFolder?.systemKind == SystemFolderKind.JUNK) Icons.Default.Inbox else Icons.Default.Report, "Спам", modifier = Modifier.size(20.dp)) }
+                if (darkTheme) {
+                    IconButton(onClick = { forceLight = !forceLight }, modifier = Modifier.size(36.dp)) { Icon(if (forceLight) Icons.Default.DarkMode else Icons.Default.LightMode, "Фон письма", modifier = Modifier.size(20.dp)) }
+                }
+                IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Delete, "Удалить", modifier = Modifier.size(20.dp)) }
             }
-            Text(formatMailDate(detail.receivedAt, detailed = true), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                text = formatMailDate(detail.receivedAt, detailed = true),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.CenterVertically).padding(horizontal = 4.dp)
+            )
         }
         HorizontalDivider()
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
@@ -1039,44 +1153,60 @@ private fun DesktopMessageDetailPane(
                 }
             }
             Text(cleanSubject.ifBlank { detail.subject }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                detail.participants().forEach { p ->
-                    val k = p.email.trim().lowercase()
-                    val prof = profiles[k]
-                    LaunchedEffect(p.email, knownNames[k]) {
-                        if (needsNameResolution(p.name, p.email) && knownNames[k].isNullOrBlank() && prof == null) {
-                            onRequestProfile(p.name, p.email)
+            if (participants.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    LazyRow(
+                        state = participantRowState,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(end = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(participants, key = { "${it.role}:${it.email}:${it.name}" }) { person ->
+                            val k = person.email.trim().lowercase().ifBlank { person.name.trim().lowercase() }
+                            DesktopParticipantAvatarTile(
+                                participant = person,
+                                photo = avatars[person.email.trim().lowercase()],
+                                profile = profiles[k],
+                                knownNames = knownNames,
+                                onRequestAvatar = onRequestAvatar,
+                                onRequestProfile = { onRequestProfile(person.name, person.email) },
+                                onClick = { onSelectPerson(person) }
+                            )
                         }
                     }
-                    val full = resolveDisplayName(p.name, p.email, prof, knownNames)
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.clickable { selectedPerson = p }
-                    ) {
-                        Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            DesktopAvatar(full, p.email, avatars[k], 24.dp, onRequestAvatar)
-                            Spacer(Modifier.width(6.dp))
-                            Text("${p.role.labelRu}: ${formatShortPersonName(full, p.email)}", style = MaterialTheme.typography.labelMedium)
-                        }
+                    if (participants.size > 3) {
+                        Spacer(Modifier.height(2.dp))
+                        HorizontalScrollbar(
+                            adapter = rememberScrollbarAdapter(participantRowState),
+                            modifier = Modifier.fillMaxWidth().height(8.dp)
+                        )
                     }
                 }
             }
             val visibleAtts = detail.attachments.filterNot { it.isInline }
             if (visibleAtts.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    visibleAtts.forEach { att ->
-                        AssistChip(
-                            onClick = { onDownloadAttachment(att, true) },
-                            label = { Text(att.name) },
-                            leadingIcon = { Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(16.dp)) },
-                            trailingIcon = {
-                                IconButton(onClick = { onDownloadAttachment(att, false) }, modifier = Modifier.size(20.dp)) {
-                                    Icon(Icons.Default.Download, "Сохранить", modifier = Modifier.size(15.dp))
+                val attScroll = rememberScrollState()
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(attScroll), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        visibleAtts.forEach { att ->
+                            AssistChip(
+                                onClick = { onDownloadAttachment(att, true) },
+                                label = { Text(att.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                leadingIcon = { Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(16.dp)) },
+                                trailingIcon = {
+                                    IconButton(onClick = { onDownloadAttachment(att, false) }, modifier = Modifier.size(20.dp)) {
+                                        Icon(Icons.Default.Download, "Сохранить", modifier = Modifier.size(15.dp))
+                                    }
                                 }
-                            }
+                            )
+                        }
+                    }
+                    if (attScroll.maxValue > 0) {
+                        HorizontalScrollbar(
+                            adapter = rememberScrollbarAdapter(attScroll),
+                            modifier = Modifier.fillMaxWidth().height(8.dp)
                         )
                     }
                 }
@@ -1089,7 +1219,8 @@ private fun DesktopMessageDetailPane(
         val linkHex = if (effectiveDark) "#5CDAA5" else "#006B47"
         val bgColor = if (effectiveDark) Color(0xFF101512) else Color.White
         val fgColor = if (effectiveDark) Color(0xFFE0E4E0) else Color(0xFF181D1A)
-        val htmlDoc = remember(detail.id, detail.body, detail.isHtml, effectiveDark) {
+        val fontScale = LocalDensity.current.fontScale.coerceIn(0.85f, 2.0f)
+        val baseHtml = remember(detail.id, detail.body, detail.isHtml, effectiveDark) {
             EmailHtmlSanitizer.renderEmailDocument(
                 body = detail.body,
                 isHtml = detail.isHtml,
@@ -1099,38 +1230,308 @@ private fun DesktopMessageDetailPane(
                 linkHex = linkHex
             )
         }
-        SwingPanel(
-            background = bgColor,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            factory = {
-                val editor = JEditorPane().apply {
-                    contentType = "text/html"
-                    isEditable = false
-                    putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
-                    addHyperlinkListener { ev ->
-                        if (ev.eventType == HyperlinkEvent.EventType.ACTIVATED) {
-                            ev.url?.toString()?.let(onOpenUrl)
+        val scaledPx = (15 * fontScale).toInt()
+        val htmlDoc = remember(baseHtml, scaledPx) {
+            baseHtml.replace("font-size: 15px;", "font-size: ${scaledPx}px;")
+        }
+        val savedScrollY = remember(detail.id) { intArrayOf(0) }
+        val hideHeavyweightWebView = parentOverlayOpen || confirmDelete
+
+        if (hideHeavyweightWebView) {
+            val plainPreview = remember(detail.id, detail.body, detail.isHtml) {
+                if (detail.isHtml) Jsoup.parse(detail.body).text() else detail.body
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(bgColor)
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = plainPreview,
+                    color = fgColor.copy(alpha = 0.45f),
+                    style = MaterialTheme.typography.bodyMedium,
+                    overflow = TextOverflow.Clip
+                )
+            }
+        } else {
+            SwingPanel(
+                background = bgColor,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                factory = {
+                    val editor = JEditorPane().apply {
+                        contentType = "text/html"
+                        isEditable = false
+                        putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+                        addHyperlinkListener { ev ->
+                            if (ev.eventType == HyperlinkEvent.EventType.ACTIVATED) {
+                                ev.url?.toString()?.let(onOpenUrl)
+                            }
+                        }
+                    }
+                    val scroll = JScrollPane(
+                        editor,
+                        ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+                        ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+                    ).apply { border = null }
+                    scroll.verticalScrollBar.addAdjustmentListener { ev ->
+                        if (!ev.valueIsAdjusting) {
+                            savedScrollY[0] = ev.value
+                        }
+                    }
+                    JPanel(BorderLayout()).apply {
+                        add(scroll, BorderLayout.CENTER)
+                        putClientProperty("editor", editor)
+                        putClientProperty("scroll", scroll)
+                    }
+                },
+                update = { panel ->
+                    val editor = panel.getClientProperty("editor") as? JEditorPane ?: return@SwingPanel
+                    val scroll = panel.getClientProperty("scroll") as? JScrollPane
+                    editor.background = java.awt.Color(bgColor.toArgb())
+                    editor.foreground = java.awt.Color(fgColor.toArgb())
+                    if (editor.getClientProperty("lastDoc") != htmlDoc) {
+                        editor.putClientProperty("lastDoc", htmlDoc)
+                        editor.text = htmlDoc
+                        val restoreY = savedScrollY[0]
+                        SwingUtilities.invokeLater {
+                            if (restoreY > 0 && scroll != null) {
+                                scroll.verticalScrollBar.value = restoreY
+                            } else {
+                                editor.caretPosition = 0
+                            }
                         }
                     }
                 }
-                val scroll = JScrollPane(editor).apply { border = null }
-                JPanel(BorderLayout()).apply {
-                    add(scroll, BorderLayout.CENTER)
-                    putClientProperty("editor", editor)
-                }
-            },
-            update = { panel ->
-                val editor = panel.getClientProperty("editor") as? JEditorPane ?: return@SwingPanel
-                editor.background = java.awt.Color(bgColor.toArgb())
-                editor.foreground = java.awt.Color(fgColor.toArgb())
-                if (editor.getClientProperty("lastDoc") != htmlDoc) {
-                    editor.putClientProperty("lastDoc", htmlDoc)
-                    editor.text = htmlDoc
-                    SwingUtilities.invokeLater { editor.caretPosition = 0 }
-                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun DesktopParticipantAvatarTile(
+    participant: EmailParticipant,
+    photo: ImageBitmap?,
+    profile: PersonProfile?,
+    knownNames: Map<String, String>,
+    onRequestAvatar: (String) -> Unit,
+    onRequestProfile: () -> Unit,
+    onClick: () -> Unit
+) {
+    val emailKey = participant.email.trim().lowercase()
+    val cachedName = knownNames[emailKey]
+    LaunchedEffect(participant.email, cachedName) {
+        if (needsNameResolution(participant.name, participant.email) &&
+            cachedName.isNullOrBlank() &&
+            profile == null
+        ) {
+            onRequestProfile()
+        }
+    }
+
+    val resolvedName = resolveDisplayName(participant.name, participant.email, profile, knownNames)
+    val badgeBg = when (participant.role) {
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.primaryContainer
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+    }
+    val badgeText = when (participant.role) {
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onPrimaryContainer
+        ParticipantRole.TO -> MaterialTheme.colorScheme.onTertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+    }
+    val nameColor = when (participant.role) {
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onSurface
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiary
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+    }
+    val nameWeight = when (participant.role) {
+        ParticipantRole.FROM -> FontWeight.SemiBold
+        ParticipantRole.TO -> FontWeight.Medium
+        else -> FontWeight.Normal
+    }
+
+    Column(
+        modifier = Modifier
+            .width(82.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Surface(color = badgeBg, shape = RoundedCornerShape(8.dp)) {
+            Text(
+                text = participant.role.labelRu,
+                style = MaterialTheme.typography.labelSmall,
+                color = badgeText,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        DesktopAvatar(
+            name = resolvedName,
+            email = participant.email,
+            photo = photo,
+            size = 44.dp,
+            onRequestAvatar = onRequestAvatar,
+            modifier = if (participant.role == ParticipantRole.TO) {
+                Modifier.border(1.5.dp, MaterialTheme.colorScheme.tertiary, CircleShape)
+            } else {
+                Modifier
             }
         )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = formatShortPersonName(resolvedName, participant.email),
+            style = MaterialTheme.typography.labelSmall,
+            color = nameColor,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = nameWeight
+        )
     }
+}
+
+@Composable
+private fun DesktopPersonInfoDialog(
+    participant: EmailParticipant,
+    photo: ImageBitmap?,
+    profile: PersonProfile?,
+    knownNames: Map<String, String>,
+    isLoadingProfile: Boolean,
+    notificationsMuted: Boolean,
+    onToggleNotifications: () -> Unit,
+    onRequestProfile: () -> Unit,
+    onRequestAvatar: (String) -> Unit,
+    onCompose: () -> Unit,
+    onCopyEmail: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    LaunchedEffect(participant.email, participant.name) {
+        onRequestProfile()
+    }
+
+    val fullName = resolveDisplayName(participant.name, participant.email, profile, knownNames)
+    val primaryEmail = profile?.email?.takeIf { it.isNotBlank() } ?: participant.email
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = null,
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                DesktopAvatar(
+                    name = fullName,
+                    email = primaryEmail,
+                    photo = photo,
+                    size = 72.dp,
+                    onRequestAvatar = onRequestAvatar
+                )
+                Spacer(Modifier.height(10.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = participant.role.labelRu,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = fullName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+                if (primaryEmail.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = primaryEmail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    FilterChip(
+                        selected = !notificationsMuted,
+                        onClick = onToggleNotifications,
+                        label = {
+                            Text(if (notificationsMuted) "Уведомления выключены" else "Уведомления включены")
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (notificationsMuted) Icons.Default.NotificationsOff else Icons.Default.Notifications,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    )
+                }
+
+                if (isLoadingProfile) {
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                if (profile != null) {
+                    val rows = buildList {
+                        if (profile.jobTitle.isNotBlank()) add("Должность" to profile.jobTitle)
+                        if (profile.department.isNotBlank()) add("Подразделение" to profile.department)
+                        if (profile.company.isNotBlank()) add("Организация" to profile.company)
+                        if (profile.officeLocation.isNotBlank()) add("Кабинет" to profile.officeLocation)
+                        profile.phones.forEach { (label, num) -> add(label to num) }
+                        if (profile.aliases.isNotEmpty()) add("Доп. адреса" to profile.aliases.joinToString("\n"))
+                    }
+                    if (rows.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(8.dp))
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            rows.forEach { (label, value) ->
+                                Column {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(text = value, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (primaryEmail.isNotBlank()) {
+                TextButton(onClick = onCompose) { Text("Написать") }
+            }
+        },
+        dismissButton = {
+            Row {
+                if (primaryEmail.isNotBlank()) {
+                    TextButton(onClick = { onCopyEmail(primaryEmail) }) { Text("Копировать") }
+                }
+                TextButton(onClick = onDismiss) { Text("Закрыть") }
+            }
+        }
+    )
 }
 
 @Composable
@@ -1270,9 +1671,22 @@ private fun DesktopComposePane(
     }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(if (replyTo != null) "Ответ / Пересылка" else "Новое письмо", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = if (replyTo != null) "Ответ / Пересылка" else "Новое письмо",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.CenterVertically)
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 OutlinedButton(onClick = {
                     val chooser = JFileChooser().apply { isMultiSelectionEnabled = true }
                     if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
@@ -1428,8 +1842,13 @@ private fun DesktopContactsPane(
         )
     }
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Контакты", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Контакты", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.align(Alignment.CenterVertically))
             Row {
                 OutlinedButton(onClick = { showAdd = true }) { Text("+ Контакт") }
                 Spacer(Modifier.width(8.dp))
@@ -1481,8 +1900,13 @@ private fun DesktopCalendarPane(
         )
     }
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Календарь (30 дней)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Календарь (30 дней)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.align(Alignment.CenterVertically))
             Row {
                 OutlinedButton(onClick = { showCreate = true }) { Text("+ Событие") }
                 Spacer(Modifier.width(6.dp))
@@ -1505,6 +1929,7 @@ private fun DesktopCalendarPane(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DesktopSettingsPane(
     state: DesktopUiState,
@@ -1553,7 +1978,7 @@ private fun DesktopSettingsPane(
             onDismissRequest = { deployTarget = null },
             title = { Text("Перенести иерархию в папки?") },
             text = {
-                Column {
+                Column(modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                     Text("Будут созданы недостающие папки и привязаны правила автосортировки:", style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(6.dp))
                     val base = parseTagPath(root).size
@@ -1587,17 +2012,17 @@ private fun DesktopSettingsPane(
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Настройки", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("Настройки", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             TextButton(onClick = onClose) { Text("Закрыть") }
         }
         Text("Оформление", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             DesktopThemeMode.entries.forEach { mode ->
                 FilterChip(selected = s.themeMode == mode, onClick = { onSetThemeMode(mode) }, label = { Text(mode.labelRu) })
             }
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                 Text("Светлый фон писем")
                 Text("Показывать текст писем на светлом фоне даже в тёмной теме", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -1606,7 +2031,7 @@ private fun DesktopSettingsPane(
         HorizontalDivider()
         Text("Уведомления", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Системные уведомления о новых письмах")
+            Text("Системные уведомления о новых письмах", modifier = Modifier.weight(1f).padding(end = 12.dp))
             Switch(checked = s.notificationsEnabled, onCheckedChange = onSetNotificationsEnabled)
         }
         val mutedFoldersDisplay = state.folders.filter { it.id in s.mutedFolderIds || (it.systemKind == SystemFolderKind.INBOX && "inbox" in s.mutedFolderIds) }
@@ -1660,7 +2085,7 @@ private fun DesktopSettingsPane(
         DesktopUpdateChannel.entries.forEach { ch ->
             Row(modifier = Modifier.fillMaxWidth().clickable { onSetUpdateChannel(ch) }, verticalAlignment = Alignment.CenterVertically) {
                 RadioButton(selected = s.updateChannel == ch, onClick = { onSetUpdateChannel(ch) })
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(ch.labelRu)
                     Text(ch.descriptionRu, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1669,64 +2094,6 @@ private fun DesktopSettingsPane(
         Text("Версия: v${DesktopBuildInfo.VERSION_NAME}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedButton(onClick = onCheckUpdates, enabled = !state.isCheckingUpdate) { Text("Проверить обновления") }
     }
-}
-
-@Composable
-private fun TagRulesTreeDialog(
-    folders: List<MailFolder>,
-    rules: List<TagSortRule>,
-    tagTemplates: List<String>,
-    mutedFolderIds: Set<String>,
-    onSaveRule: (String, MailFolder, Boolean) -> Unit,
-    onRemoveRule: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var editTag by remember { mutableStateOf<String?>(null) }
-    editTag?.let { t ->
-        AddTagRuleDialog(
-            folders = folders,
-            tagTemplates = tagTemplates,
-            rules = rules,
-            fixedFolder = null,
-            initialTag = t.ifBlank { null },
-            onDismiss = { editTag = null },
-            onConfirm = { tag, f, autoSub -> editTag = null; onSaveRule(tag, f, autoSub) },
-            onRemoveRule = { tag -> editTag = null; onRemoveRule(tag) }
-        )
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Автосортировка по тегам") },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
-                tagTemplates.forEach { tpl ->
-                    val segs = parseTagPath(tpl)
-                    val depth = (segs.size - 1).coerceAtLeast(0)
-                    val rule = rules.firstOrNull { it.tag.equals(tpl, true) }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { editTag = tpl }.padding(start = (depth * 12).dp, top = 6.dp, bottom = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(if (depth > 0) "↳ ${segs.last()}" else segs.lastOrNull().orEmpty())
-                            Text(
-                                text = if (rule != null) "→ ${rule.targetFolderName}" + (if (rule.targetFolderId in mutedFolderIds) " · ув. выкл." else "") else "Нажмите для настройки",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (rule != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (rule != null) {
-                            IconButton(onClick = { onRemoveRule(rule.tag) }, modifier = Modifier.size(26.dp)) { Icon(Icons.Default.Close, null, Modifier.size(15.dp)) }
-                        }
-                    }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { editTag = "" }) { Text("+ Свой тег") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } }
-    )
 }
 
 @Composable
@@ -1839,7 +2206,8 @@ private fun DesktopAvatar(
     email: String,
     photo: ImageBitmap?,
     size: Dp,
-    onRequestAvatar: (String) -> Unit
+    onRequestAvatar: (String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val normEmail = email.trim().lowercase()
     LaunchedEffect(normEmail) { if ('@' in normEmail) onRequestAvatar(normEmail) }
@@ -1848,7 +2216,7 @@ private fun DesktopAvatar(
         AVATAR_COLORS[avatarPaletteIndex(k, AVATAR_COLORS.size)]
     }
     Box(
-        modifier = Modifier.size(size).clip(CircleShape).background(bgColor),
+        modifier = modifier.size(size).clip(CircleShape).background(bgColor),
         contentAlignment = Alignment.Center
     ) {
         if (photo != null) {

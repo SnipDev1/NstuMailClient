@@ -37,6 +37,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.buildAutoSortFromFolderTree
 import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
@@ -119,6 +120,8 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     val personProfiles: StateFlow<Map<String, PersonProfile?>> = _personProfiles.asStateFlow()
     private val _knownNames = MutableStateFlow<Map<String, String>>(emptyMap())
     val knownNames: StateFlow<Map<String, String>> = _knownNames.asStateFlow()
+    private val _loadingProfiles = MutableStateFlow<Set<String>>(emptySet())
+    val loadingProfiles: StateFlow<Set<String>> = _loadingProfiles.asStateFlow()
     private val requestedProfiles = Collections.synchronizedSet(mutableSetOf<String>())
 
     private val seenInboxIds = Collections.synchronizedSet(mutableSetOf<String>())
@@ -1226,6 +1229,41 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         updateSettings { st -> st.copy(tagSortRules = st.tagSortRules.filterNot { it.tag.equals(norm, true) }) }
     }
 
+    fun enableAutoSortForFolderTree(folder: MailFolder) {
+        val c = client ?: return
+        val folders = _state.value.folders
+        val (newTemplates, newRules) = buildAutoSortFromFolderTree(folder, folders)
+        if (newRules.isEmpty()) {
+            showToast("Для системной папки автосортировка не применяется")
+            return
+        }
+        updateSettings { st ->
+            val mergedTemplates = sortTagTemplatesHierarchically(st.tagTemplates + newTemplates)
+            val updatedRules = st.tagSortRules.toMutableList()
+            for (rule in newRules) {
+                updatedRules.removeAll { it.tag.equals(rule.tag, ignoreCase = true) }
+                updatedRules += rule
+            }
+            st.copy(
+                tagTemplates = mergedTemplates,
+                tagSortRules = updatedRules.sortedBy { it.tag.lowercase() }
+            )
+        }
+        scope.launch {
+            val moved = runCatching { resortExistingMessages(c, folders, _state.value.settings.tagSortRules) }.getOrDefault(0)
+            if (moved > 0) {
+                val refreshed = runCatching { c.getFolders() }.getOrNull()
+                _state.update { st -> st.copy(folders = refreshed ?: st.folders) }
+                loadMessages(offset = 0, reset = true)
+            }
+            showToast("Автосортировка «${folder.displayName}»: правил ${newRules.size}, отсортировано писем: $moved")
+        }
+    }
+
+    fun showToast(message: String) {
+        _state.update { it.copy(toastMessage = message) }
+    }
+
     fun deployTagHierarchyToFolders(rootTagPath: String) {
         val c = client ?: return
         val normRoot = formatTagPath(parseTagPath(rootTagPath))
@@ -1388,6 +1426,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         val c = client ?: return
         if (!requestedProfiles.add(key)) return
         scope.launch {
+            _loadingProfiles.update { it + key }
             val profile = runCatching { c.resolvePersonProfile(email, name) }.getOrNull()
             if (profile != null && profile.displayName.isNotBlank()) {
                 val pairs = buildList {
@@ -1398,6 +1437,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 rememberKnownNames(pairs)
             }
             _personProfiles.update { it + (key to profile) }
+            _loadingProfiles.update { it - key }
         }
     }
 
@@ -1412,6 +1452,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         _avatars.value = emptyMap()
         _personProfiles.value = emptyMap()
         _knownNames.value = emptyMap()
+        _loadingProfiles.value = emptySet()
         _state.value = DesktopUiState(settings = settingsStore.load())
     }
 

@@ -22,6 +22,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.adjustFolderUnreadDelta
 import ru.nstu.mail.data.applyUniqueSubtreeCounts
+import ru.nstu.mail.data.buildAutoSortFromFolderTree
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
@@ -1318,5 +1319,37 @@ class EwsXmlTest {
                 seenKeys = emptySet()
             )
         )
+    }
+
+    @Test
+    fun `buildAutoSortFromFolderTree creates templates and rules from existing folder subtree`() {
+        val inbox = ru.nstu.mail.data.MailFolder("f-inbox", "", "", "Входящие", 0, 0, 0, 0, SystemFolderKind.INBOX)
+        val root = ru.nstu.mail.data.MailFolder("f-study", "", "", "Учёба", 0, 0, 2, 0)
+        val pz = ru.nstu.mail.data.MailFolder("f-pz", "", "f-study", "ПЗ", 0, 0, 1, 1)
+        val math = ru.nstu.mail.data.MailFolder("f-math", "", "f-pz", "Матан", 0, 0, 0, 2)
+        val labs = ru.nstu.mail.data.MailFolder("f-labs", "", "f-study", "Лаба", 0, 0, 0, 1)
+        val all = listOf(inbox, root, pz, math, labs)
+
+        val (templates, rules) = buildAutoSortFromFolderTree(root, all)
+        assertEquals(listOf("Учёба", "Учёба/Лаба", "Учёба/ПЗ", "Учёба/ПЗ/Матан"), templates)
+        assertEquals(
+            mapOf(
+                "Учёба" to "f-study",
+                "Учёба/ПЗ" to "f-pz",
+                "Учёба/Лаба" to "f-labs",
+                "Учёба/ПЗ/Матан" to "f-math"
+            ),
+            rules.associate { it.tag to it.targetFolderId }
+        )
+
+        // Clicking a child folder preserves ancestor hierarchy
+        val (subTemplates, subRules) = buildAutoSortFromFolderTree(pz, all)
+        assertEquals(listOf("Учёба", "Учёба/ПЗ", "Учёба/ПЗ/Матан"), subTemplates)
+        assertEquals(listOf("Учёба/ПЗ", "Учёба/ПЗ/Матан"), subRules.map { it.tag })
+
+        // System folders produce nothing
+        val (sysTemplates, sysRules) = buildAutoSortFromFolderTree(inbox, all)
+        assertTrue(sysTemplates.isEmpty())
+        assertTrue(sysRules.isEmpty())
     }
 }

@@ -244,6 +244,77 @@ fun sortTagTemplatesHierarchically(templates: List<String>): List<String> =
         .distinctBy { it.lowercase() }
         .sortedWith(compareBy<String>({ it.lowercase() }, { parseTagPath(it).size }))
 
+/**
+ * Builds tag templates and auto-sort rules from an existing folder subtree.
+ * Walks non-system ancestors so clicking a subfolder still produces its full tag hierarchy.
+ */
+fun buildAutoSortFromFolderTree(
+    rootFolder: MailFolder,
+    allFolders: List<MailFolder>
+): Pair<List<String>, List<TagSortRule>> {
+    if (rootFolder.isSystem || rootFolder.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)) {
+        return emptyList<String>() to emptyList()
+    }
+    val byId = allFolders.associateBy { it.id }
+    val ancestorSegs = mutableListOf<String>()
+    val visitedAncestors = mutableSetOf(rootFolder.id)
+    var curParentId = rootFolder.parentId
+    while (curParentId.isNotBlank() && visitedAncestors.add(curParentId)) {
+        val parent = byId[curParentId] ?: break
+        if (parent.isSystem || parent.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)) break
+        val seg = sanitizeTagSegment(parent.displayName)
+        if (seg.isNotEmpty()) ancestorSegs += seg
+        curParentId = parent.parentId
+    }
+    ancestorSegs.reverse()
+
+    val childrenByParent = mutableMapOf<String, MutableList<MailFolder>>()
+    for (f in allFolders) {
+        if (!f.isSystem && f.parentId.isNotBlank()) {
+            childrenByParent.getOrPut(f.parentId) { mutableListOf() }.add(f)
+        }
+    }
+
+    val templates = linkedSetOf<String>()
+    val rules = mutableListOf<TagSortRule>()
+    val visited = mutableSetOf<String>()
+    val queue = ArrayDeque<Pair<MailFolder, List<String>>>()
+    val rootSeg = sanitizeTagSegment(rootFolder.displayName)
+    if (rootSeg.isEmpty()) return emptyList<String>() to emptyList()
+    queue.addLast(rootFolder to (ancestorSegs + rootSeg))
+
+    while (queue.isNotEmpty()) {
+        val (folder, pathSegs) = queue.removeFirst()
+        if (!visited.add(folder.id)) continue
+        if (pathSegs.size > MAX_TAG_DEPTH) continue
+
+        for (len in 1..pathSegs.size) {
+            formatTagPath(pathSegs.take(len)).takeIf { it.isNotEmpty() }?.let { templates += it }
+        }
+        val fullTag = formatTagPath(pathSegs)
+        if (fullTag.isNotEmpty()) {
+            rules += TagSortRule(
+                tag = fullTag,
+                targetFolderId = folder.id,
+                targetFolderName = folder.displayName,
+                autoCreateSubfolders = true
+            )
+        }
+        if (pathSegs.size < MAX_TAG_DEPTH) {
+            val children = childrenByParent[folder.id]
+                ?.sortedBy { it.displayName.lowercase() }
+                .orEmpty()
+            for (child in children) {
+                val childSeg = sanitizeTagSegment(child.displayName)
+                if (childSeg.isNotEmpty()) {
+                    queue.addLast(child to (pathSegs + childSeg))
+                }
+            }
+        }
+    }
+    return sortTagTemplatesHierarchically(templates.toList()) to rules
+}
+
 fun shouldNotifyForMessage(
     senderEmail: String,
     effectiveFolderId: String?,

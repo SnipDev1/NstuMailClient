@@ -130,7 +130,6 @@ fun MailListScreen(
     knownNames: Map<String, String>,
     mutedFolderIds: Set<String>,
     tagSortRules: List<TagSortRule>,
-    tagTemplates: List<String>,
     swipeRightAction: SwipeAction,
     swipeLeftAction: SwipeAction,
     onRequestAvatar: (String) -> Unit,
@@ -150,8 +149,7 @@ fun MailListScreen(
     onMoveSummary: (EmailSummary, MailFolder) -> Unit,
     onToggleSpamSummary: (EmailSummary) -> Unit,
     onToggleFolderNotifications: (MailFolder) -> Unit,
-    onSaveTagSortRule: (tag: String, folder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
-    onRemoveTagSortRule: (tag: String) -> Unit,
+    onEnableFolderAutoSort: (MailFolder) -> Unit,
     onBatchSetRead: (Boolean) -> Unit,
     onBatchMove: (MailFolder) -> Unit,
     onBatchDelete: () -> Unit,
@@ -180,8 +178,6 @@ fun MailListScreen(
     var deleteFolderTarget by remember { mutableStateOf<MailFolder?>(null) }
     var confirmEmptyFolder by remember { mutableStateOf(false) }
     var moveSingleTarget by remember { mutableStateOf<EmailSummary?>(null) }
-    var quickRuleFolder by remember { mutableStateOf<MailFolder?>(null) }
-    var showRulesDialog by remember { mutableStateOf(false) }
 
     fun isFolderMuted(f: MailFolder?): Boolean {
         if (f == null) return false
@@ -218,36 +214,6 @@ fun MailListScreen(
                 moveSingleTarget = null
                 onMoveSummary(msg, target)
             }
-        )
-    }
-
-    quickRuleFolder?.let { targetFolder ->
-        AddTagRuleDialog(
-            folders = state.folders,
-            tagTemplates = tagTemplates,
-            rules = tagSortRules,
-            fixedFolder = targetFolder,
-            onDismiss = { quickRuleFolder = null },
-            onConfirm = { tag, chosen, autoSub ->
-                quickRuleFolder = null
-                onSaveTagSortRule(tag, chosen, autoSub)
-            },
-            onRemoveRule = { tag ->
-                quickRuleFolder = null
-                onRemoveTagSortRule(tag)
-            }
-        )
-    }
-
-    if (showRulesDialog) {
-        TagSortRulesDialog(
-            folders = state.folders,
-            rules = tagSortRules,
-            tagTemplates = tagTemplates,
-            mutedFolderIds = mutedFolderIds,
-            onSaveRule = onSaveTagSortRule,
-            onRemoveRule = onRemoveTagSortRule,
-            onDismiss = { showRulesDialog = false }
         )
     }
 
@@ -380,6 +346,7 @@ fun MailListScreen(
                             folder = folder.copy(depth = 0),
                             selected = state.currentFolder?.id == folder.id,
                             notificationsMuted = isFolderMuted(folder),
+                            hasAutoSortRule = false,
                             onSelect = {
                                 scope.launch { drawerState.close() }
                                 onSelectFolder(folder)
@@ -388,10 +355,7 @@ fun MailListScreen(
                                 scope.launch { drawerState.close() }
                                 onToggleFolderNotifications(folder)
                             },
-                            onSetupAutoSort = {
-                                scope.launch { drawerState.close() }
-                                quickRuleFolder = folder
-                            },
+                            onEnableAutoSort = null,
                             onCreateSubfolder = {
                                 scope.launch { drawerState.close() }
                                 createFolderParent = true to folder
@@ -411,6 +375,7 @@ fun MailListScreen(
                             folder = folder,
                             selected = state.currentFolder?.id == folder.id,
                             notificationsMuted = isFolderMuted(folder),
+                            hasAutoSortRule = false,
                             onSelect = {
                                 scope.launch { drawerState.close() }
                                 onSelectFolder(folder)
@@ -419,10 +384,7 @@ fun MailListScreen(
                                 scope.launch { drawerState.close() }
                                 onToggleFolderNotifications(folder)
                             },
-                            onSetupAutoSort = {
-                                scope.launch { drawerState.close() }
-                                quickRuleFolder = folder
-                            },
+                            onEnableAutoSort = null,
                             onCreateSubfolder = {
                                 scope.launch { drawerState.close() }
                                 createFolderParent = true to folder
@@ -480,6 +442,7 @@ fun MailListScreen(
                                 folder = folder,
                                 selected = state.currentFolder?.id == folder.id,
                                 notificationsMuted = isFolderMuted(folder),
+                                hasAutoSortRule = tagSortRules.any { it.targetFolderId == folder.id },
                                 onSelect = {
                                     scope.launch { drawerState.close() }
                                     onSelectFolder(folder)
@@ -488,9 +451,9 @@ fun MailListScreen(
                                     scope.launch { drawerState.close() }
                                     onToggleFolderNotifications(folder)
                                 },
-                                onSetupAutoSort = {
+                                onEnableAutoSort = {
                                     scope.launch { drawerState.close() }
-                                    quickRuleFolder = folder
+                                    onEnableFolderAutoSort(folder)
                                 },
                                 onCreateSubfolder = {
                                     scope.launch { drawerState.close() }
@@ -530,6 +493,7 @@ fun MailListScreen(
                                     folder = delFolder,
                                     selected = state.currentFolder?.id == delFolder.id,
                                     notificationsMuted = isFolderMuted(delFolder),
+                                    hasAutoSortRule = false,
                                     onSelect = {
                                         scope.launch { drawerState.close() }
                                         onSelectFolder(delFolder)
@@ -538,10 +502,7 @@ fun MailListScreen(
                                         scope.launch { drawerState.close() }
                                         onToggleFolderNotifications(delFolder)
                                     },
-                                    onSetupAutoSort = {
-                                        scope.launch { drawerState.close() }
-                                        quickRuleFolder = delFolder
-                                    },
+                                    onEnableAutoSort = null,
                                     onCreateSubfolder = {
                                         scope.launch { drawerState.close() }
                                         createFolderParent = true to delFolder
@@ -693,13 +654,6 @@ fun MailListScreen(
                                                 }
                                             )
                                         }
-                                        DropdownMenuItem(
-                                            text = { Text("Автосортировка по тегам") },
-                                            onClick = {
-                                                folderMenuExpanded = false
-                                                showRulesDialog = true
-                                            }
-                                        )
                                         DropdownMenuItem(
                                             text = { Text("Отметить все прочитанными") },
                                             onClick = {
@@ -908,9 +862,10 @@ private fun DrawerFolderItem(
     folder: MailFolder,
     selected: Boolean,
     notificationsMuted: Boolean,
+    hasAutoSortRule: Boolean,
     onSelect: () -> Unit,
     onToggleNotifications: () -> Unit,
-    onSetupAutoSort: () -> Unit,
+    onEnableAutoSort: (() -> Unit)?,
     onCreateSubfolder: () -> Unit,
     onRename: (() -> Unit)?,
     onDelete: (() -> Unit)?
@@ -960,6 +915,23 @@ private fun DrawerFolderItem(
                         modifier = Modifier.padding(end = 2.dp)
                     )
                 }
+                if (onEnableAutoSort != null) {
+                    IconButton(
+                        onClick = onEnableAutoSort,
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.DriveFileMove,
+                            contentDescription = "Автосортировка по тегам",
+                            tint = if (hasAutoSortRule) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                            },
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
                 Box {
                     IconButton(
                         onClick = { menuOpen = true },
@@ -983,10 +955,6 @@ private fun DrawerFolderItem(
                                 )
                             },
                             onClick = { menuOpen = false; onToggleNotifications() }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Автосортировка по тегу…") },
-                            onClick = { menuOpen = false; onSetupAutoSort() }
                         )
                         DropdownMenuItem(
                             text = { Text("Создать подпапку") },
@@ -1383,141 +1351,6 @@ private fun FolderNameDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Отмена") }
-        }
-    )
-}
-
-@Composable
-private fun TagSortRulesDialog(
-    folders: List<MailFolder>,
-    rules: List<TagSortRule>,
-    tagTemplates: List<String>,
-    mutedFolderIds: Set<String>,
-    onSaveRule: (tag: String, folder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
-    onRemoveRule: (tag: String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var editTagTarget by remember { mutableStateOf<String?>(null) }
-
-    editTagTarget?.let { initialTag ->
-        AddTagRuleDialog(
-            folders = folders,
-            tagTemplates = tagTemplates,
-            rules = rules,
-            fixedFolder = null,
-            initialTag = initialTag.ifBlank { null },
-            onDismiss = { editTagTarget = null },
-            onConfirm = { tag, folder, autoSub ->
-                editTagTarget = null
-                onSaveRule(tag, folder, autoSub)
-            },
-            onRemoveRule = { tag ->
-                editTagTarget = null
-                onRemoveRule(tag)
-            }
-        )
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Автосортировка по тегам") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 380.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = "Нажмите на любой шаблон тега, чтобы назначить папку. Неизвестные теги из НГТУ уходят в «Несортированные».",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                tagTemplates.forEach { tpl ->
-                    val segs = parseTagPath(tpl)
-                    val depth = (segs.size - 1).coerceAtLeast(0)
-                    val directRule = rules.firstOrNull { it.tag.equals(tpl, ignoreCase = true) }
-                    val muted = directRule?.targetFolderId in mutedFolderIds
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { editTagTarget = tpl }
-                            .padding(start = (depth * 12).dp, top = 6.dp, bottom = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (depth > 0) "↳ ${segs.last()}" else segs.lastOrNull().orEmpty(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (directRule != null) FontWeight.SemiBold else FontWeight.Normal
-                            )
-                            Text(
-                                text = if (directRule != null) {
-                                    "→ ${directRule.targetFolderName}" +
-                                        (if (directRule.autoCreateSubfolders) " · подпапки" else "") +
-                                        (if (muted) " · ув. выкл." else "")
-                                } else {
-                                    "Без правила (нажмите для выбора папки)"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (directRule != null) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                            )
-                        }
-                        if (directRule != null) {
-                            IconButton(
-                                onClick = { onRemoveRule(directRule.tag) },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = "Удалить правило",
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                    }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
-                }
-                val extraRules = rules.filter { rule ->
-                    tagTemplates.none { it.equals(rule.tag, ignoreCase = true) }
-                }
-                extraRules.forEach { rule ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { editTagTarget = rule.tag }
-                            .padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "${rule.pathSegments().joinToString(" › ")} → ${rule.targetFolderName}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        IconButton(
-                            onClick = { onRemoveRule(rule.tag) },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Удалить правило", modifier = Modifier.size(16.dp))
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { editTagTarget = "" }) { Text("+ Свой тег") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Закрыть") }
         }
     )
 }

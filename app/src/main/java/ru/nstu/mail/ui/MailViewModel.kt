@@ -55,6 +55,7 @@ import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.buildAutoSortFromFolderTree
 import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
@@ -385,6 +386,41 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeTagSortRule(tag: String) {
         _tagSortRules.value = MailRulesStore.removeTagSortRule(getApplication(), tag)
+    }
+
+    fun enableAutoSortForFolderTree(folder: MailFolder) {
+        val c = client ?: return
+        val folders = _state.value.folders
+        val (newTemplates, newRules) = buildAutoSortFromFolderTree(folder, folders)
+        if (newRules.isEmpty()) {
+            _state.update { it.copy(toastMessage = "Для системной папки автосортировка не применяется") }
+            return
+        }
+        val app = getApplication<Application>()
+        var updatedTemplates = _tagTemplates.value
+        for (tpl in newTemplates) {
+            updatedTemplates = MailRulesStore.addTagTemplate(app, tpl)
+        }
+        var updatedRules = _tagSortRules.value
+        for (rule in newRules) {
+            updatedRules = MailRulesStore.upsertTagSortRule(app, rule)
+        }
+        _tagTemplates.value = updatedTemplates
+        _tagSortRules.value = updatedRules
+
+        viewModelScope.launch {
+            val moved = runCatching { resortExistingMessages(c, folders, updatedRules) }.getOrDefault(0)
+            if (moved > 0) {
+                val refreshed = runCatching { c.getFolders() }.getOrNull()
+                _state.update { st -> st.copy(folders = refreshed ?: st.folders) }
+                loadMessages(offset = 0, reset = true)
+            }
+            _state.update {
+                it.copy(
+                    toastMessage = "Автосортировка «${folder.displayName}»: правил ${newRules.size}, отсортировано писем: $moved"
+                )
+            }
+        }
     }
 
     fun deployTagHierarchyToFolders(rootTagPath: String) {

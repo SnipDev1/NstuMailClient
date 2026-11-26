@@ -44,7 +44,7 @@ fun main() = application {
 @androidx.compose.runtime.Composable
 private fun LaunchedEffectOnce(window: java.awt.Window, icon: Image?) {
     androidx.compose.runtime.LaunchedEffect(window) {
-        window.minimumSize = Dimension(920, 620)
+        window.minimumSize = Dimension(720, 520)
         if (icon != null) {
             window.setIconImage(icon)
         }
