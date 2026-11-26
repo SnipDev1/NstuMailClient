@@ -39,7 +39,6 @@ import androidx.compose.material.icons.filled.Drafts
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Inbox
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
@@ -132,7 +131,6 @@ fun MailListScreen(
     onCompose: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenCalendar: () -> Unit,
-    onOpenOwa: () -> Unit,
     onOpenSettings: () -> Unit,
     onCheckUpdates: () -> Unit,
     onLogout: () -> Unit,
@@ -388,17 +386,6 @@ fun MailListScreen(
                     )
 
                     NavigationDrawerItem(
-                        label = { Text("Открыть OWA (WebView)") },
-                        selected = false,
-                        icon = { Icon(Icons.Default.Language, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onOpenOwa()
-                        },
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-
-                    NavigationDrawerItem(
                         label = { Text("Настройки") },
                         selected = false,
                         icon = { Icon(Icons.Default.Settings, contentDescription = null) },
@@ -601,7 +588,6 @@ fun MailListScreen(
                             modifier = Modifier.weight(1f)
                         )
                         TextButton(onClick = onRefresh) { Text("Повтор") }
-                        TextButton(onClick = onOpenOwa) { Text("OWA") }
                     }
                 }
 

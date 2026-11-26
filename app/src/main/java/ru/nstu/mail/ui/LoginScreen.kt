@@ -29,7 +29,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -56,11 +55,9 @@ fun LoginScreen(
     initialCredentials: Credentials?,
     isLoading: Boolean,
     errorMessage: String?,
-    suggestOwaFallback: Boolean,
     themeMode: AppThemeMode,
     onSetThemeMode: (AppThemeMode) -> Unit,
-    onLogin: (email: String, password: String, serverUrl: String) -> Unit,
-    onOpenOwa: (email: String, password: String, serverUrl: String) -> Unit
+    onLogin: (email: String, password: String, serverUrl: String) -> Unit
 ) {
     var email by rememberSaveable { mutableStateOf(initialCredentials?.email.orEmpty()) }
     var password by remember { mutableStateOf(initialCredentials?.password.orEmpty()) }
@@ -214,14 +211,6 @@ fun LoginScreen(
                             color = MaterialTheme.colorScheme.onErrorContainer,
                             style = MaterialTheme.typography.bodyMedium
                         )
-                        if (suggestOwaFallback) {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "Если на сервере отключён NTLM EWS, используйте вход через OWA ниже.",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
                     }
                 }
             }
@@ -240,20 +229,8 @@ fun LoginScreen(
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                 } else {
-                    Text("Войти (EWS)")
+                    Text("Войти")
                 }
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            OutlinedButton(
-                onClick = { onOpenOwa(email, password, serverUrl) },
-                enabled = !isLoading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-            ) {
-                Text("Войти через OWA (WebView)")
             }
             }
         }

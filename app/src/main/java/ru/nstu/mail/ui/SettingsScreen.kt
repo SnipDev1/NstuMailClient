@@ -51,12 +51,15 @@ import ru.nstu.mail.BuildConfig
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.notify.MailNotificationHelper
 import ru.nstu.mail.notify.NOTIFICATION_INTERVALS_MINUTES
+import ru.nstu.mail.notify.NotificationMode
+import ru.nstu.mail.notify.PUSH_SERVICE_CHANNEL_ID
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     themeMode: AppThemeMode,
     notificationsEnabled: Boolean,
+    notificationMode: NotificationMode,
     notificationIntervalMinutes: Int,
     updateChannel: UpdateChannel,
     isCheckingUpdate: Boolean,
@@ -64,6 +67,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onSetNotificationsEnabled: (Boolean) -> Unit,
+    onSetNotificationMode: (NotificationMode) -> Unit,
     onSetNotificationInterval: (Int) -> Unit,
     onCheckNewMailNow: () -> Unit,
     onNotificationPermissionResult: (Boolean) -> Unit,
@@ -187,29 +191,89 @@ fun SettingsScreen(
             if (notificationsEnabled && hasSystemPerm) {
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    text = "Интервал проверки",
+                    text = "Режим доставки",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    NOTIFICATION_INTERVALS_MINUTES.forEach { minutes ->
-                        val label = if (minutes >= 60) "${minutes / 60} час" else "$minutes мин"
-                        FilterChip(
-                            selected = notificationIntervalMinutes == minutes,
-                            onClick = { onSetNotificationInterval(minutes) },
-                            label = { Text(label) }
+                Spacer(Modifier.height(4.dp))
+                NotificationMode.entries.forEach { mode ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSetNotificationMode(mode) }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = notificationMode == mode,
+                            onClick = { onSetNotificationMode(mode) }
                         )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(mode.labelRu, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                mode.descriptionRu,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                OutlinedButton(onClick = onCheckNewMailNow) {
-                    Text("Проверить сейчас")
+
+                if (notificationMode == NotificationMode.PUSH) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Системное уведомление «ожидание новых писем» в шторке можно скрыть в настройках канала Android.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    MailNotificationHelper.channelSettingsIntent(context, PUSH_SERVICE_CHANNEL_ID)
+                                )
+                            }
+                        }) {
+                            Text("Скрыть уведомление в шторке")
+                        }
+                        OutlinedButton(onClick = onCheckNewMailNow) {
+                            Text("Проверить сейчас")
+                        }
+                    }
+                } else {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Интервал проверки",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        NOTIFICATION_INTERVALS_MINUTES.forEach { minutes ->
+                            val label = if (minutes >= 60) "${minutes / 60} час" else "$minutes мин"
+                            FilterChip(
+                                selected = notificationIntervalMinutes == minutes,
+                                onClick = { onSetNotificationInterval(minutes) },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(onClick = onCheckNewMailNow) {
+                        Text("Проверить сейчас")
+                    }
                 }
             }
 

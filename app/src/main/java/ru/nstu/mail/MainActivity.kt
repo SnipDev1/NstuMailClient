@@ -29,7 +29,6 @@ import ru.nstu.mail.ui.MailListScreen
 import ru.nstu.mail.ui.MailViewModel
 import ru.nstu.mail.ui.MessageDetailScreen
 import ru.nstu.mail.ui.NstuMailTheme
-import ru.nstu.mail.ui.OwaWebViewScreen
 import ru.nstu.mail.ui.Screen
 import ru.nstu.mail.ui.SettingsScreen
 import ru.nstu.mail.ui.UpdateDialog
@@ -56,6 +55,7 @@ class MainActivity : ComponentActivity() {
             val themeMode by vm.themeMode.collectAsState()
             val updateChannel by vm.updateChannel.collectAsState()
             val notificationsEnabled by vm.notificationsEnabled.collectAsState()
+            val notificationMode by vm.notificationMode.collectAsState()
             val notificationIntervalMinutes by vm.notificationIntervalMinutes.collectAsState()
             val pendingId by pendingMessageId.collectAsState()
 
@@ -114,11 +114,9 @@ class MainActivity : ComponentActivity() {
                         initialCredentials = state.credentials,
                         isLoading = state.isLoading,
                         errorMessage = state.errorMessage,
-                        suggestOwaFallback = state.suggestOwaFallback,
                         themeMode = themeMode,
                         onSetThemeMode = vm::setThemeMode,
-                        onLogin = vm::login,
-                        onOpenOwa = vm::openOwaFallback
+                        onLogin = vm::login
                     )
 
                     Screen.MailList -> {
@@ -159,7 +157,6 @@ class MainActivity : ComponentActivity() {
                             onCompose = { vm.openCompose() },
                             onOpenContacts = vm::openContacts,
                             onOpenCalendar = vm::openCalendar,
-                            onOpenOwa = vm::openOwaFromMailList,
                             onOpenSettings = vm::openSettings,
                             onCheckUpdates = { vm.checkForUpdates(manual = true) },
                             onLogout = vm::logout,
@@ -254,6 +251,7 @@ class MainActivity : ComponentActivity() {
                     Screen.Settings -> SettingsScreen(
                         themeMode = themeMode,
                         notificationsEnabled = notificationsEnabled,
+                        notificationMode = notificationMode,
                         notificationIntervalMinutes = notificationIntervalMinutes,
                         updateChannel = updateChannel,
                         isCheckingUpdate = state.isCheckingUpdate,
@@ -261,18 +259,13 @@ class MainActivity : ComponentActivity() {
                         onBack = vm::backToMailList,
                         onSetThemeMode = vm::setThemeMode,
                         onSetNotificationsEnabled = vm::setNotificationsEnabled,
+                        onSetNotificationMode = vm::setNotificationMode,
                         onSetNotificationInterval = vm::setNotificationInterval,
                         onCheckNewMailNow = vm::checkNewMailNow,
                         onNotificationPermissionResult = vm::onNotificationPermissionResult,
                         onSetUpdateChannel = vm::setUpdateChannel,
                         onCheckUpdates = { vm.checkForUpdates(manual = true) },
                         onClearToast = vm::clearToast
-                    )
-
-                    Screen.OwaWebView -> OwaWebViewScreen(
-                        credentials = state.credentials,
-                        onBack = vm::exitOwaToAppropriateScreen,
-                        onLogout = vm::logout
                     )
                 }
             }

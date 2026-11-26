@@ -576,4 +576,81 @@ class EwsXmlTest {
         val merged = mergeSeenMessageIds(listOf("a", "b", "c"), listOf("b", "d", "e"), maxSize = 4)
         assertEquals(listOf("b", "c", "d", "e"), merged)
     }
+
+    @Test
+    fun `streaming subscription builders and event chunk parser handle NewMailEvent and statuses`() {
+        val subReq = EwsXml.buildStreamingSubscribeRequest()
+        assertTrue(subReq.contains("<m:StreamingSubscriptionRequest>"))
+        assertTrue(subReq.contains("<t:EventType>NewMailEvent</t:EventType>"))
+
+        val subResp = """
+            <Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/">
+              <Body>
+                <m:SubscribeResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+                  <m:ResponseMessages>
+                    <m:SubscribeResponseMessage ResponseClass="Success">
+                      <m:ResponseCode>NoError</m:ResponseCode>
+                      <m:SubscriptionId>SUB123</m:SubscriptionId>
+                    </m:SubscribeResponseMessage>
+                  </m:ResponseMessages>
+                </m:SubscribeResponse>
+              </Body>
+            </Envelope>
+        """.trimIndent()
+        assertEquals("SUB123", EwsXml.parseSubscribeResponse(subResp))
+
+        val getEvReq = EwsXml.buildGetStreamingEventsRequest("SUB123", 25)
+        assertTrue(getEvReq.contains("<t:SubscriptionId>SUB123</t:SubscriptionId>"))
+        assertTrue(getEvReq.contains("<m:ConnectionTimeout>25</m:ConnectionTimeout>"))
+
+        val chunkXml = """
+            <Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/">
+              <Body>
+                <m:GetStreamingEventsResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                              xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:GetStreamingEventsResponseMessage ResponseClass="Success">
+                      <m:ResponseCode>NoError</m:ResponseCode>
+                      <m:Notifications>
+                        <m:Notification>
+                          <t:SubscriptionId>SUB123</t:SubscriptionId>
+                          <t:NewMailEvent>
+                            <t:ItemId Id="MSG1"/>
+                          </t:NewMailEvent>
+                          <t:NewMailEvent>
+                            <t:ItemId Id="MSG2"/>
+                          </t:NewMailEvent>
+                        </m:Notification>
+                      </m:Notifications>
+                      <m:ConnectionStatus>OK</m:ConnectionStatus>
+                    </m:GetStreamingEventsResponseMessage>
+                  </m:ResponseMessages>
+                </m:GetStreamingEventsResponse>
+              </Body>
+            </Envelope>
+        """.trimIndent()
+        val parsed = EwsXml.parseStreamingChunkEvents(chunkXml)
+        assertEquals(listOf("MSG1", "MSG2"), parsed.newMailItemIds)
+        assertFalse(parsed.connectionClosed)
+        assertFalse(parsed.subscriptionInvalid)
+
+        val closedXml = """
+            <Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/">
+              <Body>
+                <m:GetStreamingEventsResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+                  <m:ResponseMessages>
+                    <m:GetStreamingEventsResponseMessage ResponseClass="Error">
+                      <m:ResponseCode>ErrorInvalidSubscription</m:ResponseCode>
+                      <m:ConnectionStatus>Closed</m:ConnectionStatus>
+                    </m:GetStreamingEventsResponseMessage>
+                  </m:ResponseMessages>
+                </m:GetStreamingEventsResponse>
+              </Body>
+            </Envelope>
+        """.trimIndent()
+        val closed = EwsXml.parseStreamingChunkEvents(closedXml)
+        assertTrue(closed.connectionClosed)
+        assertTrue(closed.subscriptionInvalid)
+        assertTrue(closed.newMailItemIds.isEmpty())
+    }
 }

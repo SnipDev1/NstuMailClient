@@ -1,7 +1,9 @@
 package ru.nstu.mail.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -10,7 +12,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.BufferedReader
 import java.io.IOException
+import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 
 /**
@@ -341,6 +345,74 @@ class EwsClient(private val credentials: Credentials) {
         }
     }
 
+    suspend fun createStreamingSubscription(): String = withContext(Dispatchers.IO) {
+        val xml = postSoapWithAuthFallback(EwsXml.buildStreamingSubscribeRequest())
+        EwsXml.parseSubscribeResponse(xml)
+    }
+
+    suspend fun unsubscribe(subscriptionId: String) = withContext(Dispatchers.IO) {
+        if (subscriptionId.isBlank()) return@withContext
+        runCatching { postSoapWithAuthFallback(EwsXml.buildUnsubscribeRequest(subscriptionId)) }
+    }
+
+    suspend fun streamInboxEvents(
+        subscriptionId: String,
+        timeoutMinutes: Int = 25,
+        onChunk: suspend (EwsXml.StreamingChunkResult) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val soapBody = EwsXml.buildGetStreamingEventsRequest(subscriptionId, timeoutMinutes)
+        val streamingClient = activeClient.newBuilder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
+        val request = Request.Builder()
+            .url(endpointUrl)
+            .post(soapBody.toRequestBody(XML_MEDIA_TYPE))
+            .header("Accept", "text/xml")
+            .build()
+        val call = streamingClient.newCall(request)
+        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        try {
+            val response = try {
+                call.execute()
+            } catch (e: IOException) {
+                throw EwsException(
+                    "Потоковое соединение прервано: ${e.localizedMessage ?: e.javaClass.simpleName}",
+                    cause = e
+                )
+            }
+            response.use { resp ->
+                if (resp.code == 401 || resp.code == 403 || resp.code == 404) {
+                    throw EwsException("Ошибка авторизации (${resp.code})", isAuthError = true)
+                }
+                if (resp.code != 200) {
+                    throw EwsException("HTTP ошибка ${resp.code}")
+                }
+                val body = resp.body ?: return@use
+                val reader = BufferedReader(InputStreamReader(body.byteStream(), Charsets.UTF_8))
+                val buffer = StringBuilder()
+                val charBuf = CharArray(4096)
+                val endRegex = Regex("</(?:[A-Za-z0-9_]+:)?Envelope>")
+                while (true) {
+                    val read = reader.read(charBuf)
+                    if (read == -1) break
+                    buffer.append(charBuf, 0, read)
+                    while (true) {
+                        val match = endRegex.find(buffer) ?: break
+                        val startIdx = buffer.indexOf('<').coerceAtLeast(0)
+                        val endIdx = match.range.last + 1
+                        val chunkXml = buffer.substring(startIdx, endIdx)
+                        buffer.delete(0, endIdx)
+                        val parsed = EwsXml.parseStreamingChunkEvents(chunkXml)
+                        onChunk(parsed)
+                    }
+                }
+            }
+        } finally {
+            cancelHandle?.dispose()
+            call.cancel()
+        }
+    }
+
     // --- Transport ---
 
     private fun postSoapWithAuthFallback(soapBody: String): String {
@@ -384,11 +456,11 @@ class EwsClient(private val credentials: Credentials) {
             return when (resp.code) {
                 200 -> bodyStr
                 401 -> throw EwsException(
-                    "Ошибка авторизации (401). Проверьте логин/пароль или войдите через OWA.",
+                    "Ошибка авторизации (401). Проверьте логин и пароль.",
                     isAuthError = true
                 )
                 403, 404 -> throw EwsException(
-                    "EWS недоступен (HTTP ${resp.code}). Попробуйте вход через OWA.",
+                    "EWS недоступен (HTTP ${resp.code}). Проверьте адрес сервера.",
                     isAuthError = true
                 )
                 500 -> {

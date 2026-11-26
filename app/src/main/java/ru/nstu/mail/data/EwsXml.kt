@@ -1143,6 +1143,103 @@ object EwsXml {
         return DownloadedAttachment(name = name, contentType = ctype, bytes = bytes)
     }
 
+    // --- Streaming Notifications ---
+
+    data class StreamingChunkResult(
+        val newMailItemIds: List<String>,
+        val connectionClosed: Boolean,
+        val subscriptionInvalid: Boolean
+    )
+
+    fun buildStreamingSubscribeRequest(): String {
+        return wrapSoap(
+            """
+            <m:Subscribe>
+              <m:StreamingSubscriptionRequest>
+                <t:FolderIds>
+                  <t:DistinguishedFolderId Id="inbox"/>
+                </t:FolderIds>
+                <t:EventTypes>
+                  <t:EventType>NewMailEvent</t:EventType>
+                </t:EventTypes>
+              </m:StreamingSubscriptionRequest>
+            </m:Subscribe>
+            """.trimIndent()
+        )
+    }
+
+    fun parseSubscribeResponse(xml: String): String {
+        val doc = parseDocument(xml)
+        checkSoapErrors(doc)
+        val subId = doc.getElementsByTagNameNS(EWS_MESSAGES, "SubscriptionId")
+            .item(0)?.textContent?.trim().orEmpty()
+        if (subId.isBlank()) {
+            throw EwsException("Не удалось получить SubscriptionId от сервера")
+        }
+        return subId
+    }
+
+    fun buildGetStreamingEventsRequest(
+        subscriptionId: String,
+        connectionTimeoutMinutes: Int = 25
+    ): String {
+        val timeout = connectionTimeoutMinutes.coerceIn(1, 30)
+        return wrapSoap(
+            """
+            <m:GetStreamingEvents>
+              <m:SubscriptionIds>
+                <t:SubscriptionId>${escapeXml(subscriptionId)}</t:SubscriptionId>
+              </m:SubscriptionIds>
+              <m:ConnectionTimeout>$timeout</m:ConnectionTimeout>
+            </m:GetStreamingEvents>
+            """.trimIndent()
+        )
+    }
+
+    fun buildUnsubscribeRequest(subscriptionId: String): String {
+        return wrapSoap(
+            """
+            <m:Unsubscribe>
+              <m:SubscriptionId>${escapeXml(subscriptionId)}</m:SubscriptionId>
+            </m:Unsubscribe>
+            """.trimIndent()
+        )
+    }
+
+    fun parseStreamingChunkEvents(envelopeXml: String): StreamingChunkResult {
+        val doc = parseDocument(envelopeXml)
+        val statusText = doc.getElementsByTagNameNS(EWS_MESSAGES, "ConnectionStatus")
+            .item(0)?.textContent?.trim().orEmpty()
+        val closed = statusText.equals("Closed", ignoreCase = true)
+
+        var invalid = false
+        val codes = doc.getElementsByTagNameNS(EWS_MESSAGES, "ResponseCode")
+        for (i in 0 until codes.length) {
+            val code = (codes.item(i) as? Element)?.textContent?.trim().orEmpty()
+            if (code == "ErrorInvalidSubscription" ||
+                code == "ErrorSubscriptionNotFound" ||
+                code == "ErrorExpiredSubscription"
+            ) {
+                invalid = true
+                break
+            }
+        }
+
+        val itemIds = mutableListOf<String>()
+        val events = doc.getElementsByTagNameNS(EWS_TYPES, "NewMailEvent")
+        for (i in 0 until events.length) {
+            val ev = events.item(i) as? Element ?: continue
+            val itemId = ev.firstChildElement(EWS_TYPES, "ItemId")?.getAttribute("Id")?.trim().orEmpty()
+            if (itemId.isNotBlank()) itemIds += itemId
+        }
+
+        return StreamingChunkResult(
+            newMailItemIds = itemIds.distinct(),
+            connectionClosed = closed,
+            subscriptionInvalid = invalid
+        )
+    }
+
     fun parseSimpleSuccessResponse(xml: String) {
         val doc = parseDocument(xml)
         checkSoapErrors(doc)

@@ -560,12 +560,62 @@ fun ComposeScreen(
 
             if (showCc) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-                renderSection(ActiveRecipientField.CC, ParticipantRole.CC)
+                renderSection(ActiveRecipientField.CC, ParticipantRole.CC) {
+                    IconButton(
+                        onClick = {
+                            if (editingField == ActiveRecipientField.CC) {
+                                editingField = null
+                                editingId = null
+                                editingText = ""
+                            }
+                            if (activeField == ActiveRecipientField.CC) {
+                                activeField = ActiveRecipientField.TO
+                                onClearSuggestions()
+                            }
+                            ccRecipients = emptyList()
+                            ccInput = ""
+                            showCc = false
+                        },
+                        enabled = !isSending,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Убрать копию",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             }
 
             if (showBcc) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-                renderSection(ActiveRecipientField.BCC, ParticipantRole.BCC)
+                renderSection(ActiveRecipientField.BCC, ParticipantRole.BCC) {
+                    IconButton(
+                        onClick = {
+                            if (editingField == ActiveRecipientField.BCC) {
+                                editingField = null
+                                editingId = null
+                                editingText = ""
+                            }
+                            if (activeField == ActiveRecipientField.BCC) {
+                                activeField = ActiveRecipientField.TO
+                                onClearSuggestions()
+                            }
+                            bccRecipients = emptyList()
+                            bccInput = ""
+                            showBcc = false
+                        },
+                        enabled = !isSending,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Убрать скрытую копию",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

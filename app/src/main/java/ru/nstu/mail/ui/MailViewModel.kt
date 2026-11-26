@@ -51,6 +51,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.notify.MailNotificationHelper
+import ru.nstu.mail.notify.NotificationMode
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -73,7 +74,6 @@ sealed interface Screen {
     data object Contacts : Screen
     data object Calendar : Screen
     data object Settings : Screen
-    data object OwaWebView : Screen
 }
 
 data class MailUiState(
@@ -84,7 +84,6 @@ data class MailUiState(
     val isSending: Boolean = false,
     val isDownloadingAttachment: Boolean = false,
     val errorMessage: String? = null,
-    val suggestOwaFallback: Boolean = false,
     val toastMessage: String? = null,
     val folders: List<MailFolder> = emptyList(),
     val currentFolder: MailFolder? = null,
@@ -121,6 +120,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _notificationsEnabled = MutableStateFlow(MailNotificationHelper.isEnabled(application))
     val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled.asStateFlow()
+
+    private val _notificationMode = MutableStateFlow(MailNotificationHelper.getMode(application))
+    val notificationMode: StateFlow<NotificationMode> = _notificationMode.asStateFlow()
 
     private val _notificationIntervalMinutes =
         MutableStateFlow(MailNotificationHelper.getIntervalMinutes(application))
@@ -209,10 +211,19 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             if (currentInbox.isNotEmpty() || !MailNotificationHelper.isBaselineReady(app)) {
                 MailNotificationHelper.recordSeenMessages(app, currentInbox)
             }
-            MailNotificationHelper.schedulePeriodicCheck(app, replaceExisting = true)
+            MailNotificationHelper.syncBackgroundDelivery(app, replacePeriodic = true)
         } else {
-            MailNotificationHelper.cancelPeriodicCheck(app)
+            MailNotificationHelper.syncBackgroundDelivery(app)
             MailNotificationHelper.cancelNotifications(app)
+        }
+    }
+
+    fun setNotificationMode(mode: NotificationMode) {
+        val app = getApplication<Application>()
+        MailNotificationHelper.setMode(app, mode)
+        _notificationMode.value = mode
+        if (_notificationsEnabled.value) {
+            MailNotificationHelper.syncBackgroundDelivery(app, replacePeriodic = true)
         }
     }
 
@@ -221,7 +232,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         MailNotificationHelper.setIntervalMinutes(app, minutes)
         _notificationIntervalMinutes.value = MailNotificationHelper.getIntervalMinutes(app)
         if (_notificationsEnabled.value) {
-            MailNotificationHelper.schedulePeriodicCheck(app, replaceExisting = true)
+            MailNotificationHelper.syncBackgroundDelivery(app, replacePeriodic = true)
         }
     }
 
@@ -267,16 +278,13 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     fun login(email: String, password: String, serverUrl: String = DEFAULT_SERVER_URL) {
         val trimmedEmail = email.trim()
         if (trimmedEmail.isBlank() || password.isEmpty()) {
-            _state.update { it.copy(errorMessage = "Введите логин и пароль", suggestOwaFallback = false) }
+            _state.update { it.copy(errorMessage = "Введите логин и пароль") }
             return
         }
 
         val normalizedUrl = runCatching { EwsClient.normalizeHttpsUrl(serverUrl) }.getOrElse { err ->
             _state.update {
-                it.copy(
-                    errorMessage = err.message ?: "Некорректный адрес сервера",
-                    suggestOwaFallback = false
-                )
+                it.copy(errorMessage = err.message ?: "Некорректный адрес сервера")
             }
             return
         }
@@ -289,7 +297,6 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     isLoading = true,
                     errorMessage = null,
-                    suggestOwaFallback = false,
                     credentials = creds
                 )
             }
@@ -313,7 +320,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 if (inbox?.systemKind == SystemFolderKind.INBOX) {
                     MailNotificationHelper.recordSeenMessages(app, items)
                 }
-                MailNotificationHelper.schedulePeriodicCheck(app, replaceExisting = false)
+                MailNotificationHelper.syncBackgroundDelivery(app, replacePeriodic = false)
                 viewModelScope.launch {
                     runCatching { newClient.getRecipientCache() }
                         .onSuccess { cache ->
@@ -344,8 +351,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         isLoading = false,
                         screen = Screen.Login,
-                        errorMessage = e.message ?: "Ошибка подключения",
-                        suggestOwaFallback = e.isAuthError
+                        errorMessage = e.message ?: "Ошибка подключения"
                     )
                 }
             } catch (e: Exception) {
@@ -353,42 +359,11 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         isLoading = false,
                         screen = Screen.Login,
-                        errorMessage = e.message ?: "Неизвестная ошибка",
-                        suggestOwaFallback = false
+                        errorMessage = e.message ?: "Неизвестная ошибка"
                     )
                 }
             }
         }
-    }
-
-    fun openOwaFallback(email: String, password: String, serverUrl: String) {
-        val normalizedUrl = runCatching { EwsClient.normalizeHttpsUrl(serverUrl) }.getOrElse { err ->
-            _state.update {
-                it.copy(
-                    errorMessage = err.message ?: "Некорректный адрес сервера",
-                    suggestOwaFallback = false
-                )
-            }
-            return
-        }
-        val creds = Credentials(email.trim(), password, normalizedUrl)
-        _state.update {
-            it.copy(
-                credentials = creds,
-                errorMessage = null,
-                suggestOwaFallback = false,
-                screen = Screen.OwaWebView
-            )
-        }
-    }
-
-    fun openOwaFromMailList() {
-        _state.update { it.copy(screen = Screen.OwaWebView, errorMessage = null) }
-    }
-
-    fun exitOwaToAppropriateScreen() {
-        val target = if (client != null) Screen.MailList else Screen.Login
-        _state.update { it.copy(screen = target) }
     }
 
     // --- Folders & Filters ---
