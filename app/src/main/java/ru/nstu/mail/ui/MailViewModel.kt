@@ -53,6 +53,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.UpdateChannel
+import ru.nstu.mail.data.adjustFolderUnreadDelta
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseFormattedRecipient
@@ -122,6 +123,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     private val _themeMode = MutableStateFlow(loadThemeMode())
     val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
 
+    private val _alwaysLightEmailBody = MutableStateFlow(prefs.getBoolean("always_light_email_body", false))
+    val alwaysLightEmailBody: StateFlow<Boolean> = _alwaysLightEmailBody.asStateFlow()
+
     private val _updateChannel = MutableStateFlow(loadUpdateChannel())
     val updateChannel: StateFlow<UpdateChannel> = _updateChannel.asStateFlow()
 
@@ -190,6 +194,11 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     fun setThemeMode(mode: AppThemeMode) {
         prefs.edit().putString("theme_mode", mode.name).apply()
         _themeMode.value = mode
+    }
+
+    fun setAlwaysLightEmailBody(enabled: Boolean) {
+        prefs.edit().putBoolean("always_light_email_body", enabled).apply()
+        _alwaysLightEmailBody.value = enabled
     }
 
     private fun loadUpdateChannel(): UpdateChannel {
@@ -586,6 +595,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     if (taggedInbox.isNotEmpty()) {
                         var cache: MutableList<MailFolder>? = folders.toMutableList()
                         var anyChanged = false
+                        var sortError: String? = null
                         val rules = _tagSortRules.value
                         val app = getApplication<Application>()
                         for (item in taggedInbox) {
@@ -601,11 +611,16 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                             if (outcome.movedFromInbox || outcome.foldersChanged) {
                                 anyChanged = true
                             }
+                            if (sortError == null && outcome.errorMessage != null) {
+                                sortError = outcome.errorMessage
+                            }
                         }
                         if (anyChanged) {
                             folders = runCatching { c.getFolders() }.getOrDefault(folders)
                             updatedCurrent = folders.firstOrNull { it.id == updatedCurrent.id } ?: updatedCurrent
                             _mutedFolderIds.value = MailRulesStore.getMutedFolderIds(app)
+                        } else if (!sortError.isNullOrBlank()) {
+                            _state.update { it.copy(toastMessage = "Автосортировка: $sortError") }
                         }
                     }
                 }
@@ -845,7 +860,15 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 c.setRead(pairs, isRead)
                 _state.update { st ->
+                    val changedCount = st.messages.count { it.id in ids && it.isRead != isRead }
+                    val delta = if (isRead) -changedCount else changedCount
+                    val nextFolders = adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, delta)
+                    val nextCurrent = st.currentFolder?.let { cur ->
+                        nextFolders.firstOrNull { it.id == cur.id } ?: cur
+                    }
                     st.copy(
+                        folders = nextFolders,
+                        currentFolder = nextCurrent,
                         selectedIds = emptySet(),
                         messages = st.messages.map {
                             if (it.id in ids) it.copy(isRead = isRead) else it
@@ -946,7 +969,15 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 c.setRead(listOf(summary.id to summary.changeKey), next)
                 _state.update { st ->
+                    val existing = st.messages.firstOrNull { it.id == summary.id }
+                    val delta = if (existing == null || existing.isRead == next) 0 else if (next) -1 else 1
+                    val nextFolders = adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, delta)
+                    val nextCurrent = st.currentFolder?.let { cur ->
+                        nextFolders.firstOrNull { it.id == cur.id } ?: cur
+                    }
                     st.copy(
+                        folders = nextFolders,
+                        currentFolder = nextCurrent,
                         messages = st.messages.map {
                             if (it.id == summary.id) it.copy(isRead = next) else it
                         },
@@ -1026,6 +1057,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             var foldersCache: MutableList<MailFolder>? = _state.value.folders.toMutableList()
             val movedIds = mutableSetOf<String>()
             var folderListChanged = false
+            var sortError: String? = null
 
             for (item in pending) {
                 val (outcome, nextCache) = MailNotificationHelper.applyAutoSortForMessage(
@@ -1043,6 +1075,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 if (outcome.movedFromInbox) {
                     movedIds += item.id
                 }
+                if (sortError == null && outcome.errorMessage != null) {
+                    sortError = outcome.errorMessage
+                }
             }
             if (movedIds.isNotEmpty() || folderListChanged) {
                 val folders = runCatching { c.getFolders() }.getOrNull()
@@ -1054,6 +1089,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         selectedIds = st.selectedIds - movedIds
                     )
                 }
+            } else if (!sortError.isNullOrBlank()) {
+                _state.update { it.copy(toastMessage = "Автосортировка: $sortError") }
             }
         }
     }
@@ -1099,7 +1136,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(isLoading = true, errorMessage = null) }
             try {
                 var detail = c.getMessage(itemId)
-                if (!detail.isRead && !detail.isDraft) {
+                val markedRead = !detail.isRead && !detail.isDraft
+                if (markedRead) {
                     runCatching { c.setRead(listOf(detail.id to detail.changeKey), true) }
                     detail = detail.copy(isRead = true)
                 }
@@ -1128,11 +1166,21 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 rememberKnownNames(detailNames)
 
                 _state.update { st ->
+                    val nextFolders = if (markedRead) {
+                        adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, -1)
+                    } else {
+                        st.folders
+                    }
+                    val nextCurrent = st.currentFolder?.let { cur ->
+                        nextFolders.firstOrNull { it.id == cur.id } ?: cur
+                    }
                     val updatedList = st.messages.map {
                         if (it.id == detail.id) it.copy(isRead = true) else it
                     }
                     st.copy(
                         isLoading = false,
+                        folders = nextFolders,
+                        currentFolder = nextCurrent,
                         messages = updatedList,
                         selectedMessage = detail,
                         screen = Screen.MessageDetail
@@ -1194,7 +1242,14 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 c.setRead(listOf(detail.id to detail.changeKey), newState)
                 _state.update { st ->
+                    val delta = if (newState) -1 else 1
+                    val nextFolders = adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, delta)
+                    val nextCurrent = st.currentFolder?.let { cur ->
+                        nextFolders.firstOrNull { it.id == cur.id } ?: cur
+                    }
                     st.copy(
+                        folders = nextFolders,
+                        currentFolder = nextCurrent,
                         selectedMessage = st.selectedMessage?.copy(isRead = newState),
                         messages = st.messages.map {
                             if (it.id == detail.id) it.copy(isRead = newState) else it

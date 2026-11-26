@@ -177,12 +177,34 @@ object EwsXml {
             )
         )
 
+        val rolledUpCounts = mutableMapOf<String, Pair<Int, Int>>()
+        val rollingVisited = mutableSetOf<String>()
+        fun computeRolledUp(node: MailFolder): Pair<Int, Int> {
+            rolledUpCounts[node.id]?.let { return it }
+            if (!rollingVisited.add(node.id)) return node.totalCount to node.unreadCount
+            var total = node.totalCount
+            var unread = node.unreadCount
+            for (child in childrenByParent[node.id].orEmpty()) {
+                val (ct, cu) = computeRolledUp(child)
+                total += ct
+                unread += cu
+            }
+            val pair = total to unread
+            rolledUpCounts[node.id] = pair
+            return pair
+        }
+
         val ordered = mutableListOf<MailFolder>()
         val visited = mutableSetOf<String>()
 
         fun appendTree(node: MailFolder, depth: Int) {
             if (!visited.add(node.id)) return
-            ordered += node.copy(depth = depth)
+            val (rolledTotal, rolledUnread) = computeRolledUp(node)
+            ordered += node.copy(
+                depth = depth,
+                totalCount = rolledTotal,
+                unreadCount = rolledUnread
+            )
             val children = childrenByParent[node.id]
                 ?.sortedWith(
                     compareBy<MailFolder>(
@@ -1410,5 +1432,26 @@ object EwsXml {
     $bodyContent
   </soap:Body>
 </soap:Envelope>"""
+    }
+}
+
+fun adjustFolderUnreadDelta(
+    folders: List<MailFolder>,
+    folderId: String?,
+    delta: Int
+): List<MailFolder> {
+    if (folderId.isNullOrBlank() || delta == 0) return folders
+    val byId = folders.associateBy { it.id }
+    val affected = mutableSetOf<String>()
+    var cur: String = folderId
+    while (cur.isNotBlank() && affected.add(cur)) {
+        cur = byId[cur]?.parentId.orEmpty()
+    }
+    return folders.map { folder ->
+        if (folder.id in affected) {
+            folder.copy(unreadCount = (folder.unreadCount + delta).coerceAtLeast(0))
+        } else {
+            folder
+        }
     }
 }

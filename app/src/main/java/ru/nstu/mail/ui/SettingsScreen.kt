@@ -75,6 +75,7 @@ import ru.nstu.mail.notify.PUSH_SERVICE_CHANNEL_ID
 @Composable
 fun SettingsScreen(
     themeMode: AppThemeMode,
+    alwaysLightEmailBody: Boolean,
     notificationsEnabled: Boolean,
     notificationMode: NotificationMode,
     notificationIntervalMinutes: Int,
@@ -90,6 +91,7 @@ fun SettingsScreen(
     toastMessage: String?,
     onBack: () -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
+    onSetAlwaysLightEmailBody: (Boolean) -> Unit,
     onSetNotificationsEnabled: (Boolean) -> Unit,
     onSetNotificationMode: (NotificationMode) -> Unit,
     onSetNotificationInterval: (Int) -> Unit,
@@ -293,6 +295,28 @@ fun SettingsScreen(
                         label = { Text(mode.labelRu) }
                     )
                 }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(
+                        text = "Светлый фон писем",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "Показывать текст писем на светлом фоне даже в тёмной теме",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = alwaysLightEmailBody,
+                    onCheckedChange = onSetAlwaysLightEmailBody
+                )
             }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))

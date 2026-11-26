@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: MailViewModel = viewModel()
             val themeMode by vm.themeMode.collectAsState()
+            val alwaysLightEmailBody by vm.alwaysLightEmailBody.collectAsState()
             val updateChannel by vm.updateChannel.collectAsState()
             val notificationsEnabled by vm.notificationsEnabled.collectAsState()
             val notificationMode by vm.notificationMode.collectAsState()
@@ -194,6 +195,7 @@ class MainActivity : ComponentActivity() {
                                 mutedSenders = mutedSenders,
                                 loadingProfiles = loadingProfiles,
                                 darkTheme = darkTheme,
+                                defaultLightBody = alwaysLightEmailBody,
                                 isDownloadingAttachment = state.isDownloadingAttachment,
                                 toastMessage = state.toastMessage,
                                 onBack = vm::backToMailList,
@@ -271,6 +273,7 @@ class MainActivity : ComponentActivity() {
 
                     Screen.Settings -> SettingsScreen(
                         themeMode = themeMode,
+                        alwaysLightEmailBody = alwaysLightEmailBody,
                         notificationsEnabled = notificationsEnabled,
                         notificationMode = notificationMode,
                         notificationIntervalMinutes = notificationIntervalMinutes,
@@ -286,6 +289,7 @@ class MainActivity : ComponentActivity() {
                         toastMessage = state.toastMessage,
                         onBack = vm::backToMailList,
                         onSetThemeMode = vm::setThemeMode,
+                        onSetAlwaysLightEmailBody = vm::setAlwaysLightEmailBody,
                         onSetNotificationsEnabled = vm::setNotificationsEnabled,
                         onSetNotificationMode = vm::setNotificationMode,
                         onSetNotificationInterval = vm::setNotificationInterval,

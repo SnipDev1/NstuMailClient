@@ -41,13 +41,17 @@ import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.ReplyAll
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Inbox
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -113,6 +117,7 @@ fun MessageDetailScreen(
     mutedSenders: Set<String>,
     loadingProfiles: Set<String>,
     darkTheme: Boolean,
+    defaultLightBody: Boolean = false,
     isDownloadingAttachment: Boolean,
     toastMessage: String?,
     onBack: () -> Unit,
@@ -141,7 +146,7 @@ fun MessageDetailScreen(
     var showMovePicker by remember { mutableStateOf(false) }
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var selectedParticipant by remember { mutableStateOf<EmailParticipant?>(null) }
-    var forceLightBody by remember(detail.id) { mutableStateOf(false) }
+    var forceLightBody by remember(detail.id, defaultLightBody) { mutableStateOf(defaultLightBody) }
 
     val participants = remember(detail.id, detail.from, detail.fromEmail, detail.to, detail.cc, detail.bcc) {
         detail.participants()
@@ -300,6 +305,16 @@ fun MessageDetailScreen(
                                         }
                                     )
                                 },
+                                leadingIcon = {
+                                    Icon(
+                                        if (currentFolder?.systemKind == SystemFolderKind.JUNK) {
+                                            Icons.Default.Inbox
+                                        } else {
+                                            Icons.Default.Report
+                                        },
+                                        null
+                                    )
+                                },
                                 onClick = { moreMenuExpanded = false; onToggleSpam(detail) }
                             )
                             if (detail.fromEmail.isNotBlank()) {
@@ -329,6 +344,12 @@ fun MessageDetailScreen(
                                         Text(
                                             if (forceLightBody) "Тёмный фон письма"
                                             else "Светлый фон письма"
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (forceLightBody) Icons.Default.DarkMode else Icons.Default.LightMode,
+                                            null
                                         )
                                     },
                                     onClick = {

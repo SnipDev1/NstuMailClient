@@ -269,6 +269,7 @@ fun ComposeScreen(
     }
     var subject by rememberSaveable { mutableStateOf(initialParsedSubject.second) }
     var showAddTagDialog by remember { mutableStateOf(false) }
+    var showSendConfirm by remember { mutableStateOf(false) }
 
     var body by rememberSaveable {
         mutableStateOf(
@@ -399,6 +400,23 @@ fun ComposeScreen(
         return emails.joinToString(", ")
     }
 
+    fun formatRecipientsPreview(field: ActiveRecipientField): String {
+        val formatted = listFor(field).map { rec ->
+            val key = rec.email.trim().lowercase()
+            val resolved = resolveDisplayName(rec.name, rec.email, personProfiles[key], knownNames)
+            if (resolved.isNotBlank() && !resolved.equals(rec.email, ignoreCase = true)) {
+                "$resolved <${rec.email}>"
+            } else {
+                rec.email
+            }
+        }.toMutableList()
+        val trailing = inputFor(field).trim()
+        if (trailing.isNotEmpty()) {
+            formatted += trailing
+        }
+        return formatted.joinToString(", ")
+    }
+
     fun submitEmail(send: Boolean) {
         commitInlineEdit()
         val finalSubject = formatSubjectWithTagHierarchies(subject, allHierarchies)
@@ -414,6 +432,59 @@ fun ComposeScreen(
             selectedUris,
             context,
             send
+        )
+    }
+
+    if (showSendConfirm) {
+        val toPreview = formatRecipientsPreview(ActiveRecipientField.TO)
+        val ccPreview = formatRecipientsPreview(ActiveRecipientField.CC)
+        val bccPreview = formatRecipientsPreview(ActiveRecipientField.BCC)
+        val subjectPreview = formatSubjectWithTagHierarchies(subject, allHierarchies).ifBlank { "(Без темы)" }
+        AlertDialog(
+            onDismissRequest = { showSendConfirm = false },
+            title = { Text("Отправить письмо?") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Кому: $toPreview",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (ccPreview.isNotBlank()) {
+                        Text(
+                            text = "Копия: $ccPreview",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (bccPreview.isNotBlank()) {
+                        Text(
+                            text = "Скрытая копия: $bccPreview",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "Тема: $subjectPreview",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSendConfirm = false
+                    submitEmail(send = true)
+                }) { Text("Отправить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSendConfirm = false }) { Text("Отмена") }
+            }
         )
     }
 
@@ -499,7 +570,17 @@ fun ComposeScreen(
                         Icon(Icons.Default.Save, contentDescription = "Сохранить черновик")
                     }
                     IconButton(
-                        onClick = { submitEmail(send = true) },
+                        onClick = {
+                            commitInlineEdit()
+                            commitTrailingInput(ActiveRecipientField.TO)
+                            commitTrailingInput(ActiveRecipientField.CC)
+                            commitTrailingInput(ActiveRecipientField.BCC)
+                            if (collectAddressesForSubmit(ActiveRecipientField.TO).isBlank()) {
+                                submitEmail(send = true)
+                            } else {
+                                showSendConfirm = true
+                            }
+                        },
                         enabled = !isSending
                     ) {
                         if (isSending) {

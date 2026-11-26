@@ -20,6 +20,7 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.adjustFolderUnreadDelta
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.extractAllTagsForMatching
@@ -118,10 +119,14 @@ class EwsXmlTest {
 
         assertEquals("Учёба", folders[1].displayName)
         assertEquals(0, folders[1].depth)
+        assertEquals(3, folders[1].unreadCount)
+        assertEquals(15, folders[1].totalCount)
         assertFalse(folders[1].isSystem)
 
         assertEquals("Лабы", folders[2].displayName)
         assertEquals(1, folders[2].depth)
+        assertEquals(2, folders[2].unreadCount)
+        assertEquals(5, folders[2].totalCount)
         assertFalse(folders[2].isSystem)
     }
 
@@ -985,5 +990,26 @@ class EwsXmlTest {
         val (items, _) = EwsXml.parseFindItemsResponse(xml)
         assertEquals(1, items.size)
         assertEquals("student@stud.nstu.ru", items[0].senderEmail)
+    }
+
+    @Test
+    fun `adjustFolderUnreadDelta updates child parent and grandparent unread counts`() {
+        val folders = listOf(
+            ru.nstu.mail.data.MailFolder("f-root", "", "", "Учёба", totalCount = 20, unreadCount = 5, childFolderCount = 1, depth = 0),
+            ru.nstu.mail.data.MailFolder("f-sub", "", "f-root", "ПЗ", totalCount = 10, unreadCount = 3, childFolderCount = 1, depth = 1),
+            ru.nstu.mail.data.MailFolder("f-leaf", "", "f-sub", "Лаба 1", totalCount = 4, unreadCount = 1, childFolderCount = 0, depth = 2),
+            ru.nstu.mail.data.MailFolder("f-sib", "", "f-root", "Другое", totalCount = 5, unreadCount = 2, childFolderCount = 0, depth = 1)
+        )
+
+        val afterRead = adjustFolderUnreadDelta(folders, "f-leaf", -1)
+        assertEquals(4, afterRead.first { it.id == "f-root" }.unreadCount)
+        assertEquals(2, afterRead.first { it.id == "f-sub" }.unreadCount)
+        assertEquals(0, afterRead.first { it.id == "f-leaf" }.unreadCount)
+        assertEquals(2, afterRead.first { it.id == "f-sib" }.unreadCount)
+
+        // Does not drop below zero
+        val clamped = adjustFolderUnreadDelta(afterRead, "f-leaf", -5)
+        assertEquals(0, clamped.first { it.id == "f-leaf" }.unreadCount)
+        assertEquals(0, clamped.first { it.id == "f-root" }.unreadCount)
     }
 }
