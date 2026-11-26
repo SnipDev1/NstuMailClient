@@ -58,6 +58,7 @@ import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
+import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.notify.MailNotificationHelper
@@ -444,6 +445,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
+                val resorted = resortExistingMessages(c, workingFolders, _tagSortRules.value)
+                if (resorted > 0) workingFolders = c.getFolders().toMutableList()
+
                 _state.update { st ->
                     val updatedCurrent = st.currentFolder?.let { cur ->
                         workingFolders.firstOrNull { it.id == cur.id } ?: cur
@@ -452,9 +456,10 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         isLoading = false,
                         folders = workingFolders,
                         currentFolder = updatedCurrent,
-                        toastMessage = "Структура «$normRoot» перенесена (создано папок: $createdCount, правил: $boundCount)"
+                        toastMessage = "Структура «$normRoot» перенесена (создано папок: $createdCount, правил: $boundCount, отсортировано писем: $resorted)"
                     )
                 }
+                if (resorted > 0) loadMessages(offset = 0, reset = true)
             } catch (e: Exception) {
                 _state.update {
                     it.copy(
@@ -464,6 +469,40 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    // Re-applies rules to tagged mail already sitting in «Входящие» / «Несортированные».
+    private suspend fun resortExistingMessages(
+        c: EwsClient,
+        folders: List<MailFolder>,
+        rules: List<TagSortRule>
+    ): Int {
+        val app = getApplication<Application>()
+        var cache: MutableList<MailFolder>? = folders.toMutableList()
+        var moved = 0
+        val sources = folders.filter {
+            it.systemKind == SystemFolderKind.INBOX ||
+                (!it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true))
+        }
+        for (src in sources) {
+            // shortcut: only the newest RESORT_PAGE_SIZE letters per folder, add paging if folders get huge
+            val items = runCatching {
+                c.listMessages(folderIds = listOf(src.id), offset = 0, pageSize = RESORT_PAGE_SIZE).first
+            }.getOrNull() ?: continue
+            for (item in items.filter { matchAllAutoSortRules(it.subject, rules).isNotEmpty() }) {
+                val (outcome, next) = MailNotificationHelper.applyAutoSortForMessage(
+                    context = app,
+                    client = c,
+                    msg = item,
+                    rules = rules,
+                    inboxFolderId = src.id,
+                    foldersCache = cache
+                )
+                cache = next
+                if (outcome.movedFromInbox) moved++
+            }
+        }
+        return moved
     }
 
     fun setSwipeRightAction(action: SwipeAction) {
@@ -2049,6 +2088,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val PAGE_SIZE = 25
+        private const val RESORT_PAGE_SIZE = 200
         private const val MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024L
         private const val MAX_SINGLE_UPLOAD_BYTES = 20 * 1024 * 1024L
         private const val MAX_TOTAL_UPLOAD_BYTES = 25 * 1024 * 1024L

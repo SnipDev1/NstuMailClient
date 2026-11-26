@@ -41,6 +41,7 @@ import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
+import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.needsNameResolution
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseTagPath
@@ -1271,19 +1272,43 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                     }
                 }
                 updateSettings { it.copy(tagSortRules = newRules.sortedBy { r -> r.tag.lowercase() }) }
+                val resorted = resortExistingMessages(c, workingFolders, _state.value.settings.tagSortRules)
+                if (resorted > 0) workingFolders = c.getFolders().toMutableList()
                 _state.update { st ->
                     val cur = st.currentFolder?.let { old -> workingFolders.firstOrNull { it.id == old.id } ?: old }
                     st.copy(
                         isLoading = false,
                         folders = workingFolders,
                         currentFolder = cur,
-                        toastMessage = "Структура «$normRoot» перенесена (создано папок: $created, правил: $bound)"
+                        settings = settingsStore.load(),
+                        toastMessage = "Структура «$normRoot» перенесена (создано папок: $created, правил: $bound, отсортировано писем: $resorted)"
                     )
                 }
+                if (resorted > 0) loadMessages(offset = 0, reset = true)
             } catch (e: Exception) {
                 _state.update { it.copy(isLoading = false, toastMessage = e.message ?: "Ошибка переноса структуры") }
             }
         }
+    }
+
+    // Re-applies rules to tagged mail already sitting in «Входящие» / «Несортированные».
+    private suspend fun resortExistingMessages(c: EwsClient, folders: List<MailFolder>, rules: List<TagSortRule>): Int {
+        var cache: MutableList<MailFolder>? = folders.toMutableList()
+        var moved = 0
+        val sources = folders.filter {
+            it.systemKind == SystemFolderKind.INBOX || (!it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, true))
+        }
+        for (src in sources) {
+            // shortcut: only the newest RESORT_PAGE_SIZE letters per folder, add paging if folders get huge
+            val items = runCatching { c.listMessages(listOf(src.id), offset = 0, pageSize = RESORT_PAGE_SIZE).first }
+                .getOrNull() ?: continue
+            for (item in items.filter { matchAllAutoSortRules(it.subject, rules).isNotEmpty() }) {
+                val (out, next) = DesktopAutoSorter.applyAutoSortForMessage(settingsStore, c, item, rules, src.id, cache)
+                cache = next
+                if (out.movedFromInbox) moved++
+            }
+        }
+        return moved
     }
 
     fun setUpdateChannel(ch: DesktopUpdateChannel) {
@@ -1387,5 +1412,6 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     companion object {
         private const val PAGE_SIZE = 25
+        private const val RESORT_PAGE_SIZE = 200
     }
 }
