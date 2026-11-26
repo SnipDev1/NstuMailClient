@@ -10,6 +10,7 @@ object MailRulesStore {
     private const val KEY_MUTED_SENDERS = "rules_muted_senders"
     private const val KEY_CUSTOM_TAGS = "rules_custom_tags"
     private const val KEY_TAG_TEMPLATES = "rules_tag_templates"
+    private const val KEY_LEGACY_DEFAULTS_PURGED = "rules_legacy_default_templates_purged"
     private const val KEY_SORT_RULES = "rules_tag_sort"
     private const val KEY_INBOX_ID = "rules_inbox_folder_id"
     private const val KEY_SWIPE_RIGHT = "gesture_swipe_right"
@@ -88,8 +89,7 @@ object MailRulesStore {
     fun getTagTemplates(context: Context): List<String> {
         val p = prefs(context)
         val raw = p.getString(KEY_TAG_TEMPLATES, null)
-        if (raw == null) {
-            // Migrate legacy custom tags cleanly alongside defaults once
+        val loaded = if (raw == null) {
             val legacyRaw = p.getString(KEY_CUSTOM_TAGS, null)
             val legacy = if (legacyRaw != null) {
                 runCatching {
@@ -101,15 +101,26 @@ object MailRulesStore {
             } else {
                 emptyList()
             }
-            return sortTagTemplatesHierarchically(DEFAULT_TAG_TEMPLATES + legacy)
+            sortTagTemplatesHierarchically(legacy)
+        } else {
+            runCatching {
+                val arr = JSONArray(raw)
+                val list = (0 until arr.length()).mapNotNull { i ->
+                    arr.optString(i, "").trim().takeIf { it.isNotEmpty() }
+                }
+                sortTagTemplatesHierarchically(list)
+            }.getOrDefault(emptyList())
         }
-        return runCatching {
-            val arr = JSONArray(raw)
-            val list = (0 until arr.length()).mapNotNull { i ->
-                arr.optString(i, "").trim().takeIf { it.isNotEmpty() }
-            }
-            sortTagTemplatesHierarchically(list)
-        }.getOrDefault(DEFAULT_TAG_TEMPLATES)
+        if (!p.getBoolean(KEY_LEGACY_DEFAULTS_PURGED, false)) {
+            val cleaned = purgeUnreferencedLegacyDefaultTemplates(loaded, getTagSortRules(context))
+            val arr = JSONArray().apply { cleaned.forEach { put(it) } }
+            p.edit()
+                .putString(KEY_TAG_TEMPLATES, arr.toString())
+                .putBoolean(KEY_LEGACY_DEFAULTS_PURGED, true)
+                .apply()
+            return cleaned
+        }
+        return loaded
     }
 
     private fun saveTagTemplates(context: Context, templates: List<String>): List<String> {

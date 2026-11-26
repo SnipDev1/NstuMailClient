@@ -114,11 +114,29 @@ class DesktopStorageTest {
     }
 
     @Test
-    fun `fresh install has no default tag templates`() {
+    fun `fresh install has no default tag templates and legacy defaults purge once on upgrade`() {
         val tempDir = Files.createTempDirectory("nstumail-empty-tpl").toFile()
         try {
             assertTrue(DesktopSettings().tagTemplates.isEmpty())
-            assertTrue(DesktopSettingsStore(tempDir).load().tagTemplates.isEmpty())
+            val store = DesktopSettingsStore(tempDir)
+            assertTrue(store.load().tagTemplates.isEmpty())
+
+            // Simulate pre-v1.0.10 settings.json containing old saved defaults without legacyDefaultsPurged flag
+            tempDir.resolve("settings.json").writeText(
+                """
+                {
+                  "tagTemplates": ["Важно", "Учёба", "Учёба/Лаба", "Учёба/Лекция", "Учёба/ПЗ", "Проект"],
+                  "tagSortRules": []
+                }
+                """.trimIndent(),
+                Charsets.UTF_8
+            )
+            val migrated = store.load()
+            assertEquals(listOf("Проект"), migrated.tagTemplates)
+
+            // User explicitly adds "Важно" after migration -> must stay
+            store.save(migrated.copy(tagTemplates = listOf("Важно", "Проект")))
+            assertEquals(listOf("Важно", "Проект"), store.load().tagTemplates)
         } finally {
             tempDir.deleteRecursively()
         }

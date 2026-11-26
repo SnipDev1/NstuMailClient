@@ -8,11 +8,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import ru.nstu.mail.data.Credentials
 import ru.nstu.mail.data.DEFAULT_SERVER_URL
-import ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.compareSemVer
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.purgeUnreferencedLegacyDefaultTemplates
 import ru.nstu.mail.data.sortTagTemplatesHierarchically
 import java.io.File
 import java.io.IOException
@@ -52,14 +52,15 @@ data class DesktopSettings(
     val notificationsEnabled: Boolean = true,
     val mutedFolderIds: Set<String> = emptySet(),
     val mutedSenders: Set<String> = emptySet(),
-    val tagTemplates: List<String> = DEFAULT_TAG_TEMPLATES,
+    val tagTemplates: List<String> = emptyList(),
     val tagSortRules: List<TagSortRule> = emptyList(),
     val inboxFolderId: String? = null,
     val updateChannel: DesktopUpdateChannel = if ('-' in DesktopBuildInfo.VERSION_NAME) {
         DesktopUpdateChannel.TEST
     } else {
         DesktopUpdateChannel.STABLE
-    }
+    },
+    val legacyDefaultsPurged: Boolean = true
 )
 
 object DesktopConfigPaths {
@@ -165,7 +166,7 @@ class DesktopSettingsStore(private val configDir: File = DesktopConfigPaths.defa
                 arr.optString(i, "").trim().takeIf { it.isNotEmpty() }
             }
             sortTagTemplatesHierarchically(raw)
-        } ?: DEFAULT_TAG_TEMPLATES
+        } ?: emptyList()
         val rules = obj.optJSONArray("tagSortRules")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val item = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -177,17 +178,27 @@ class DesktopSettingsStore(private val configDir: File = DesktopConfigPaths.defa
             }
         } ?: emptyList()
 
-        DesktopSettings(
+        val alreadyPurged = obj.optBoolean("legacyDefaultsPurged", false)
+        val cleanTemplates = if (alreadyPurged) {
+            templates
+        } else {
+            purgeUnreferencedLegacyDefaultTemplates(templates, rules)
+        }
+
+        val loaded = DesktopSettings(
             themeMode = theme,
             alwaysLightEmailBody = obj.optBoolean("alwaysLightEmailBody", false),
             notificationsEnabled = obj.optBoolean("notificationsEnabled", true),
             mutedFolderIds = mutedFolders,
             mutedSenders = mutedSenders,
-            tagTemplates = templates,
+            tagTemplates = cleanTemplates,
             tagSortRules = rules,
             inboxFolderId = obj.optString("inboxFolderId", "").takeIf { it.isNotBlank() },
-            updateChannel = channel
+            updateChannel = channel,
+            legacyDefaultsPurged = true
         )
+        if (!alreadyPurged) save(loaded)
+        loaded
     }.getOrDefault(DesktopSettings())
 
     @Synchronized
@@ -200,6 +211,7 @@ class DesktopSettingsStore(private val configDir: File = DesktopConfigPaths.defa
             put("mutedFolderIds", JSONArray(settings.mutedFolderIds.sorted()))
             put("mutedSenders", JSONArray(settings.mutedSenders.sorted()))
             put("tagTemplates", JSONArray(sortTagTemplatesHierarchically(settings.tagTemplates)))
+            put("legacyDefaultsPurged", true)
             put("tagSortRules", JSONArray().apply {
                 settings.tagSortRules.forEach { r ->
                     put(JSONObject().apply {

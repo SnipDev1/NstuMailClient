@@ -25,7 +25,22 @@ enum class SwipeAction(val labelRu: String) {
 
 val DEFAULT_TAG_TEMPLATES: List<String> = emptyList()
 val DEFAULT_TAGS = DEFAULT_TAG_TEMPLATES
+private val LEGACY_DEFAULT_TAG_TEMPLATES = setOf("учёба", "учёба/пз", "учёба/лаба", "учёба/лекция", "важно")
 const val UNSORTED_FOLDER_NAME = "Несортированные"
+
+/** Removes old pre-v1.0.10 hardcoded default templates once when not referenced by active sort rules. */
+fun purgeUnreferencedLegacyDefaultTemplates(
+    templates: List<String>,
+    rules: List<TagSortRule>
+): List<String> {
+    val referenced = rules.map { formatTagPath(parseTagPath(it.tag)).lowercase() }.toSet()
+    val filtered = templates.filterNot { tpl ->
+        val norm = formatTagPath(parseTagPath(tpl)).lowercase()
+        norm in LEGACY_DEFAULT_TAG_TEMPLATES &&
+            referenced.none { r -> r == norm || r.startsWith("$norm/") }
+    }
+    return sortTagTemplatesHierarchically(filtered)
+}
 
 private const val MAX_TAG_DEPTH = 4
 private const val MAX_TAG_LEN = 36
