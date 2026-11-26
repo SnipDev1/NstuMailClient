@@ -21,7 +21,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -61,6 +64,7 @@ import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UpdateChannel
+import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.notify.MailNotificationHelper
 import ru.nstu.mail.notify.NOTIFICATION_INTERVALS_MINUTES
 import ru.nstu.mail.notify.NotificationMode
@@ -76,8 +80,8 @@ fun SettingsScreen(
     folders: List<MailFolder>,
     mutedFolderIds: Set<String>,
     mutedSenders: Set<String>,
+    tagTemplates: List<String>,
     tagSortRules: List<TagSortRule>,
-    availableTags: List<String>,
     swipeRightAction: SwipeAction,
     swipeLeftAction: SwipeAction,
     updateChannel: UpdateChannel,
@@ -92,7 +96,10 @@ fun SettingsScreen(
     onNotificationPermissionResult: (Boolean) -> Unit,
     onUnmuteFolder: (String) -> Unit,
     onUnmuteSender: (String) -> Unit,
-    onSaveTagSortRule: (tag: String, folder: MailFolder) -> Unit,
+    onAddTagTemplate: (String) -> Unit,
+    onUpdateTagTemplate: (oldPath: String, newPath: String) -> Unit,
+    onRemoveTagTemplate: (String) -> Unit,
+    onSaveTagSortRule: (tag: String, folder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
     onRemoveTagSortRule: (String) -> Unit,
     onSetSwipeRightAction: (SwipeAction) -> Unit,
     onSetSwipeLeftAction: (SwipeAction) -> Unit,
@@ -110,17 +117,65 @@ fun SettingsScreen(
         mutableStateOf(MailNotificationHelper.isIgnoringBatteryOptimizations(context))
     }
     var showAddRuleDialog by remember { mutableStateOf(false) }
+    var editingTemplateTarget by remember { mutableStateOf<Pair<String?, String>?>(null) }
     var pickingSwipeRight by remember { mutableStateOf<Boolean?>(null) }
 
     if (showAddRuleDialog && folders.isNotEmpty()) {
         AddTagRuleDialog(
             folders = folders,
-            availableTags = availableTags,
+            tagTemplates = tagTemplates,
             fixedFolder = null,
             onDismiss = { showAddRuleDialog = false },
-            onConfirm = { tag, folder ->
+            onConfirm = { tag, folder, autoSub ->
                 showAddRuleDialog = false
-                onSaveTagSortRule(tag, folder)
+                onSaveTagSortRule(tag, folder, autoSub)
+            }
+        )
+    }
+
+    editingTemplateTarget?.let { (oldPath, initialText) ->
+        var text by remember(oldPath, initialText) { mutableStateOf(initialText) }
+        AlertDialog(
+            onDismissRequest = { editingTemplateTarget = null },
+            title = {
+                Text(if (oldPath != null) "Редактировать шаблон" else "Новый шаблон тега")
+            },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it.take(80) },
+                        label = { Text("Путь тега через / (напр. 1/2)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    val segs = parseTagPath(text)
+                    if (segs.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        val preview = segs.joinToString(", ", "[", "]") { "\"$it\"" }
+                        Text(
+                            text = "В теме письма: $preview",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (oldPath != null) {
+                            onUpdateTagTemplate(oldPath, text)
+                        } else {
+                            onAddTagTemplate(text)
+                        }
+                        editingTemplateTarget = null
+                    },
+                    enabled = parseTagPath(text).isNotEmpty()
+                ) { Text("Сохранить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingTemplateTarget = null }) { Text("Отмена") }
             }
         )
     }
@@ -458,7 +513,74 @@ fun SettingsScreen(
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
 
             Text(
-                text = "Теги и автосортировка",
+                text = "Шаблоны тегов",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Используйте «/» для вложенности (например 1/2 → [\"1\", \"2\"] в конце темы).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(6.dp))
+            tagTemplates.forEach { tpl ->
+                val segs = parseTagPath(tpl)
+                val depth = (segs.size - 1).coerceAtLeast(0)
+                val preview = segs.joinToString(", ", "[", "]") { "\"$it\"" }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = (depth * 14).dp, top = 2.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (depth > 0) "↳ ${segs.last()}" else segs.lastOrNull().orEmpty(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (depth == 0) FontWeight.Medium else FontWeight.Normal
+                        )
+                        Text(
+                            text = preview,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (segs.size < 4) {
+                            IconButton(
+                                onClick = { editingTemplateTarget = null to "$tpl/" },
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Подтег", modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        IconButton(
+                            onClick = { editingTemplateTarget = tpl to tpl },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = "Изменить", modifier = Modifier.size(16.dp))
+                        }
+                        IconButton(
+                            onClick = { onRemoveTagTemplate(tpl) },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Удалить", modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { editingTemplateTarget = null to "" }) {
+                Text("+ Добавить шаблон")
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            Text(
+                text = "Правила автосортировки",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.SemiBold
@@ -466,13 +588,14 @@ fun SettingsScreen(
             Spacer(Modifier.height(6.dp))
             if (tagSortRules.isEmpty()) {
                 Text(
-                    text = "Правил автосортировки пока нет. Письма с тегом в теме (напр. [ПЗ]) могут автоматически уходить в нужную папку.",
+                    text = "Правил автосортировки пока нет. Письма с тегом в конце темы (напр. [\"1\", \"2\"]) уходят в нужную папку и подпапки.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
                 tagSortRules.forEach { rule ->
                     val targetMuted = rule.targetFolderId in mutedFolderIds
+                    val segPreview = rule.pathSegments().joinToString(", ", "[", "]") { "\"$it\"" }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -482,12 +605,15 @@ fun SettingsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "[${rule.tag}] → ${rule.targetFolderName}",
+                                text = "$segPreview → ${rule.targetFolderName}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = if (targetMuted) "Уведомления в папке выкл." else "Уведомления в папке вкл.",
+                                text = buildString {
+                                    append(if (rule.autoCreateSubfolders) "С подпапками · " else "Только папка · ")
+                                    append(if (targetMuted) "Уведомления выкл." else "Уведомления вкл.")
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

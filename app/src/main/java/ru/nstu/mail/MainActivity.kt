@@ -59,7 +59,7 @@ class MainActivity : ComponentActivity() {
             val notificationIntervalMinutes by vm.notificationIntervalMinutes.collectAsState()
             val mutedFolderIds by vm.mutedFolderIds.collectAsState()
             val mutedSenders by vm.mutedSenders.collectAsState()
-            val customTags by vm.customTags.collectAsState()
+            val tagTemplates by vm.tagTemplates.collectAsState()
             val tagSortRules by vm.tagSortRules.collectAsState()
             val swipeRightAction by vm.swipeRightAction.collectAsState()
             val swipeLeftAction by vm.swipeLeftAction.collectAsState()
@@ -143,7 +143,7 @@ class MainActivity : ComponentActivity() {
                             knownNames = knownNames,
                             mutedFolderIds = mutedFolderIds,
                             tagSortRules = tagSortRules,
-                            availableTags = customTags,
+                            tagTemplates = tagTemplates,
                             swipeRightAction = swipeRightAction,
                             swipeLeftAction = swipeLeftAction,
                             onRequestAvatar = vm::requestAvatar,
@@ -231,7 +231,7 @@ class MainActivity : ComponentActivity() {
                         avatars = avatars,
                         personProfiles = personProfiles,
                         knownNames = knownNames,
-                        availableTags = customTags,
+                        tagTemplates = tagTemplates,
                         isSending = state.isSending,
                         errorMessage = state.errorMessage,
                         onBack = vm::backToMailList,
@@ -239,7 +239,7 @@ class MainActivity : ComponentActivity() {
                         onClearSuggestions = vm::clearDirectorySuggestions,
                         onRequestAvatar = vm::requestAvatar,
                         onRequestPersonProfile = vm::requestPersonProfile,
-                        onAddCustomTag = vm::addCustomTag,
+                        onAddTagTemplate = vm::addTagTemplate,
                         onSubmit = vm::saveOrSendEmail
                     )
 
@@ -278,8 +278,8 @@ class MainActivity : ComponentActivity() {
                         folders = state.folders,
                         mutedFolderIds = mutedFolderIds,
                         mutedSenders = mutedSenders,
+                        tagTemplates = tagTemplates,
                         tagSortRules = tagSortRules,
-                        availableTags = customTags,
                         swipeRightAction = swipeRightAction,
                         swipeLeftAction = swipeLeftAction,
                         updateChannel = updateChannel,
@@ -294,6 +294,9 @@ class MainActivity : ComponentActivity() {
                         onNotificationPermissionResult = vm::onNotificationPermissionResult,
                         onUnmuteFolder = vm::unmuteFolderById,
                         onUnmuteSender = vm::toggleSenderNotifications,
+                        onAddTagTemplate = vm::addTagTemplate,
+                        onUpdateTagTemplate = vm::updateTagTemplate,
+                        onRemoveTagTemplate = vm::removeTagTemplate,
                         onSaveTagSortRule = vm::saveTagSortRule,
                         onRemoveTagSortRule = vm::removeTagSortRule,
                         onSetSwipeRightAction = vm::setSwipeRightAction,

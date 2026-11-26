@@ -77,14 +77,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.nstu.mail.data.ContactEntry
-import ru.nstu.mail.data.DEFAULT_TAGS
 import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
+import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractSubjectTags
 import ru.nstu.mail.data.formatSubjectWithTags
+import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseFormattedRecipient
+import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.sanitizeTagSegment
 import java.util.concurrent.atomic.AtomicLong
 
 private enum class ActiveRecipientField { TO, CC, BCC }
@@ -129,7 +132,7 @@ fun ComposeScreen(
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
-    availableTags: List<String>,
+    tagTemplates: List<String>,
     isSending: Boolean,
     errorMessage: String?,
     onBack: () -> Unit,
@@ -137,7 +140,7 @@ fun ComposeScreen(
     onClearSuggestions: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestPersonProfile: (name: String, email: String) -> Unit,
-    onAddCustomTag: (String) -> Unit,
+    onAddTagTemplate: (String) -> Unit,
     onSubmit: (
         draftId: String?,
         draftChangeKey: String?,
@@ -252,7 +255,10 @@ fun ComposeScreen(
         }
     }
 
-    var selectedTags by rememberSaveable { mutableStateOf(initialParsedSubject.first) }
+    var selectedTagPathRaw by rememberSaveable {
+        mutableStateOf(formatTagPath(initialParsedSubject.first))
+    }
+    val selectedTagPath = remember(selectedTagPathRaw) { parseTagPath(selectedTagPathRaw) }
     var subject by rememberSaveable { mutableStateOf(initialParsedSubject.second) }
     var showAddTagDialog by remember { mutableStateOf(false) }
 
@@ -387,7 +393,7 @@ fun ComposeScreen(
 
     fun submitEmail(send: Boolean) {
         commitInlineEdit()
-        val finalSubject = formatSubjectWithTags(subject, selectedTags)
+        val finalSubject = formatSubjectWithTags(subject, selectedTagPath)
         onSubmit(
             draft?.id,
             draft?.changeKey,
@@ -404,15 +410,25 @@ fun ComposeScreen(
     }
 
     if (showAddTagDialog) {
-        var newTag by remember { mutableStateOf("") }
+        var newTagInput by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showAddTagDialog = false },
-            title = { Text("Новый тег") },
+            title = {
+                Text(
+                    if (selectedTagPath.isEmpty()) "Добавить тег"
+                    else "Подтег для ${selectedTagPath.joinToString(" › ")}"
+                )
+            },
             text = {
                 OutlinedTextField(
-                    value = newTag,
-                    onValueChange = { newTag = it.take(24) },
-                    label = { Text("Название тега (напр. ПЗ)") },
+                    value = newTagInput,
+                    onValueChange = { newTagInput = it },
+                    label = {
+                        Text(
+                            if (selectedTagPath.isEmpty()) "Имя или путь (напр. 1 или 1/2)"
+                            else "Имя подтега (напр. 2)"
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -420,16 +436,20 @@ fun ComposeScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val clean = newTag.trim().replace("[", "").replace("]", "")
-                        if (clean.isNotEmpty()) {
-                            onAddCustomTag(clean)
-                            if (selectedTags.none { it.equals(clean, ignoreCase = true) }) {
-                                selectedTags = selectedTags + clean
+                        val addedSegs = parseTagPath(newTagInput)
+                        if (addedSegs.isNotEmpty()) {
+                            val combined = if ('/' in newTagInput && selectedTagPath.isEmpty()) {
+                                addedSegs
+                            } else {
+                                (selectedTagPath + addedSegs).take(4)
                             }
+                            val path = formatTagPath(combined)
+                            onAddTagTemplate(path)
+                            selectedTagPathRaw = path
                         }
                         showAddTagDialog = false
                     },
-                    enabled = newTag.isNotBlank()
+                    enabled = parseTagPath(newTagInput).isNotEmpty()
                 ) { Text("Добавить") }
             },
             dismissButton = {
@@ -683,35 +703,84 @@ fun ComposeScreen(
             )
             Spacer(Modifier.height(8.dp))
 
-            val allTagChoices = remember(availableTags, selectedTags) {
-                (DEFAULT_TAGS + availableTags + selectedTags).distinctBy { it.lowercase() }
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Теги:", style = MaterialTheme.typography.labelMedium)
-                allTagChoices.forEach { tag ->
-                    val isSelected = selectedTags.any { it.equals(tag, ignoreCase = true) }
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            selectedTags = if (isSelected) {
-                                selectedTags.filterNot { it.equals(tag, ignoreCase = true) }
+            if (selectedTagPath.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Путь:", style = MaterialTheme.typography.labelMedium)
+                    selectedTagPath.forEachIndexed { idx, seg ->
+                        InputChip(
+                            selected = true,
+                            onClick = {
+                                selectedTagPathRaw = formatTagPath(selectedTagPath.take(idx + 1))
+                            },
+                            label = { Text(seg) },
+                            trailingIcon = if (idx == selectedTagPath.lastIndex) {
+                                {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Назад",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             } else {
-                                selectedTags + tag
+                                null
                             }
-                        },
-                        label = { Text(tag) }
+                        )
+                    }
+                    if (selectedTagPath.lastIndex >= 0) {
+                        TextButton(onClick = { selectedTagPathRaw = "" }) {
+                            Text("Сброс")
+                        }
+                    }
+                }
+                val suffixPreview = selectedTagPath.joinToString(", ", "[", "]") { "\"$it\"" }
+                Text(
+                    text = "В конце темы: $suffixPreview",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+
+            val nextLevelTags = remember(tagTemplates, selectedTagPath) {
+                childTagsForPrefix(tagTemplates, selectedTagPath)
+            }
+            if (selectedTagPath.size < 4) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (selectedTagPath.isEmpty()) "Теги:" else "Подтеги:",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    nextLevelTags.forEach { childSeg ->
+                        val nextSeg = sanitizeTagSegment(childSeg)
+                        FilterChip(
+                            selected = false,
+                            onClick = {
+                                if (nextSeg.isNotEmpty()) {
+                                    selectedTagPathRaw = formatTagPath(selectedTagPath + nextSeg)
+                                }
+                            },
+                            label = { Text(childSeg) }
+                        )
+                    }
+                    AssistChip(
+                        onClick = { showAddTagDialog = true },
+                        label = {
+                            Text(if (selectedTagPath.isEmpty()) "+ Тег" else "+ Подтег")
+                        }
                     )
                 }
-                AssistChip(
-                    onClick = { showAddTagDialog = true },
-                    label = { Text("+ Тег") }
-                )
             }
 
             if (selectedUris.isNotEmpty() || (draft?.attachments?.isNotEmpty() == true)) {

@@ -7,7 +7,15 @@ import org.json.JSONObject
 data class TagSortRule(
     val tag: String,
     val targetFolderId: String,
-    val targetFolderName: String
+    val targetFolderName: String,
+    val autoCreateSubfolders: Boolean = true
+) {
+    fun pathSegments(): List<String> = parseTagPath(tag)
+}
+
+data class TagMatchResult(
+    val rule: TagSortRule,
+    val remainingSubtags: List<String>
 )
 
 enum class SwipeAction(val labelRu: String) {
@@ -19,65 +27,139 @@ enum class SwipeAction(val labelRu: String) {
     SPAM("В спам / Не спам")
 }
 
-val DEFAULT_TAGS = listOf("ПЗ", "Лаба", "Лекция", "Учёба", "Важно")
+val DEFAULT_TAG_TEMPLATES = listOf("Учёба", "Учёба/ПЗ", "Учёба/Лаба", "Учёба/Лекция", "Важно")
+val DEFAULT_TAGS = DEFAULT_TAG_TEMPLATES
 
-private val LEADING_TAG_REGEX = Regex("^\\s*\\[([^\\[\\]]{1,24})]\\s*")
-private val ANY_BRACKET_TAG_REGEX = Regex("\\[([^\\[\\]]{1,24})]")
-private val HASH_TAG_REGEX = Regex("(?:^|\\s)#([\\p{L}\\p{N}_-]{1,24})(?=\\s|\$|[.,!?;:])")
+private const val MAX_TAG_DEPTH = 4
+private const val MAX_TAG_LEN = 24
+
+private val TRAILING_QUOTED_TAGS_REGEX = Regex(
+    """\s*\[\s*"[^"\[\]]{1,24}"(?:\s*,\s*"[^"\[\]]{1,24}")*\s*\]\s*$"""
+)
+private val QUOTED_ITEM_REGEX = Regex(""""([^"\[\]]{1,24})"""")
+private val LEGACY_LEADING_TAG_REGEX = Regex("""^\s*\[([^\[\]]{1,24})]\s*""")
+private val HASH_TAG_REGEX = Regex("""(?:^|\s)#([\p{L}\p{N}_/-]{1,40})(?=\s|$|[.,!?;:])""")
+
+fun sanitizeTagSegment(raw: String): String =
+    raw.trim()
+        .replace("\"", "")
+        .replace("[", "")
+        .replace("]", "")
+        .replace("/", "")
+        .replace("\\", "")
+        .replace(":", "")
+        .replace("*", "")
+        .replace("?", "")
+        .replace("<", "")
+        .replace(">", "")
+        .replace("|", "")
+        .trim()
+        .take(MAX_TAG_LEN)
+
+fun parseTagPath(raw: String): List<String> =
+    raw.split('/', '>')
+        .map { sanitizeTagSegment(it) }
+        .filter { it.isNotEmpty() }
+        .take(MAX_TAG_DEPTH)
+
+fun formatTagPath(segments: List<String>): String =
+    segments.map { sanitizeTagSegment(it) }
+        .filter { it.isNotEmpty() }
+        .take(MAX_TAG_DEPTH)
+        .joinToString("/")
 
 fun extractSubjectTags(subject: String): Pair<List<String>, String> {
-    var remaining = subject
-    val tags = mutableListOf<String>()
-    val seen = mutableSetOf<String>()
-    while (true) {
-        val match = LEADING_TAG_REGEX.find(remaining) ?: break
-        val tag = match.groupValues[1].trim()
-        if (tag.isNotEmpty() && seen.add(tag.lowercase())) {
-            tags += tag
+    val trailingMatch = TRAILING_QUOTED_TAGS_REGEX.find(subject)
+    if (trailingMatch != null) {
+        val segments = QUOTED_ITEM_REGEX.findAll(trailingMatch.value)
+            .map { sanitizeTagSegment(it.groupValues[1]) }
+            .filter { it.isNotEmpty() }
+            .take(MAX_TAG_DEPTH)
+            .toList()
+        val clean = subject.substring(0, trailingMatch.range.first).trim()
+        if (segments.isNotEmpty()) {
+            return segments to clean
         }
-        remaining = remaining.substring(match.range.last + 1)
     }
-    return tags to remaining.trim()
+
+    // Legacy fallback: leading [Tag] brackets
+    var remaining = subject
+    val legacyTags = mutableListOf<String>()
+    while (true) {
+        val m = LEGACY_LEADING_TAG_REGEX.find(remaining) ?: break
+        val seg = sanitizeTagSegment(m.groupValues[1])
+        if (seg.isNotEmpty()) legacyTags += seg
+        remaining = remaining.substring(m.range.last + 1)
+    }
+    return legacyTags.take(MAX_TAG_DEPTH) to remaining.trim()
 }
 
 fun extractAllTagsForMatching(subject: String): List<String> {
-    val tags = mutableListOf<String>()
-    val seen = mutableSetOf<String>()
-    for (m in ANY_BRACKET_TAG_REGEX.findAll(subject)) {
-        val t = m.groupValues[1].trim()
-        if (t.isNotEmpty() && seen.add(t.lowercase())) tags += t
-    }
-    for (m in HASH_TAG_REGEX.findAll(subject)) {
-        val t = m.groupValues[1].trim()
-        if (t.isNotEmpty() && seen.add(t.lowercase())) tags += t
-    }
-    return tags
+    val (primary, _) = extractSubjectTags(subject)
+    if (primary.isNotEmpty()) return primary
+    val hashMatch = HASH_TAG_REGEX.find(subject)?.groupValues?.getOrNull(1)
+    return if (!hashMatch.isNullOrBlank()) parseTagPath(hashMatch) else emptyList()
 }
 
 fun formatSubjectWithTags(cleanSubject: String, tags: List<String>): String {
     val (_, stripped) = extractSubjectTags(cleanSubject)
-    val distinctTags = tags
-        .map { it.trim().replace("[", "").replace("]", "") }
+    val cleanSegments = tags.map { sanitizeTagSegment(it) }
         .filter { it.isNotEmpty() }
-        .distinctBy { it.lowercase() }
-    val prefix = distinctTags.joinToString(" ") { "[$it]" }
-    return when {
-        prefix.isEmpty() -> cleanSubject.trim()
-        stripped.isEmpty() -> prefix
-        else -> "$prefix $stripped"
-    }
+        .take(MAX_TAG_DEPTH)
+    if (cleanSegments.isEmpty()) return stripped.ifBlank { cleanSubject.trim() }
+    val suffix = cleanSegments.joinToString(", ", prefix = "[", postfix = "]") { "\"$it\"" }
+    return if (stripped.isEmpty()) suffix else "$stripped $suffix"
 }
 
-fun matchAutoSortRule(subject: String, rules: List<TagSortRule>): TagSortRule? {
+fun matchAutoSortRuleDetailed(subject: String, rules: List<TagSortRule>): TagMatchResult? {
     if (rules.isEmpty() || subject.isBlank()) return null
-    val subjectTags = extractAllTagsForMatching(subject)
-    if (subjectTags.isEmpty()) return null
-    for (tag in subjectTags) {
-        val rule = rules.firstOrNull { it.tag.trim().equals(tag, ignoreCase = true) }
-        if (rule != null) return rule
+    val emailPath = extractAllTagsForMatching(subject)
+    if (emailPath.isEmpty()) return null
+
+    var bestMatch: TagMatchResult? = null
+    var bestLen = -1
+    for (rule in rules) {
+        val rulePath = rule.pathSegments()
+        if (rulePath.isEmpty() || emailPath.size < rulePath.size) continue
+        val prefixMatches = rulePath.indices.all { idx ->
+            emailPath[idx].equals(rulePath[idx], ignoreCase = true)
+        }
+        if (prefixMatches && rulePath.size > bestLen) {
+            bestLen = rulePath.size
+            bestMatch = TagMatchResult(
+                rule = rule,
+                remainingSubtags = emailPath.drop(rulePath.size)
+            )
+        }
     }
-    return null
+    return bestMatch
 }
+
+fun matchAutoSortRule(subject: String, rules: List<TagSortRule>): TagSortRule? =
+    matchAutoSortRuleDetailed(subject, rules)?.rule
+
+fun childTagsForPrefix(templates: List<String>, prefix: List<String>): List<String> {
+    val result = mutableListOf<String>()
+    val seen = mutableSetOf<String>()
+    for (tpl in templates) {
+        val segs = parseTagPath(tpl)
+        if (segs.size <= prefix.size) continue
+        val matches = prefix.indices.all { i -> segs[i].equals(prefix[i], ignoreCase = true) }
+        if (matches) {
+            val child = segs[prefix.size]
+            if (seen.add(child.lowercase())) {
+                result += child
+            }
+        }
+    }
+    return result
+}
+
+fun sortTagTemplatesHierarchically(templates: List<String>): List<String> =
+    templates.map { formatTagPath(parseTagPath(it)) }
+        .filter { it.isNotEmpty() }
+        .distinctBy { it.lowercase() }
+        .sortedWith(compareBy<String>({ it.lowercase() }, { parseTagPath(it).size }))
 
 fun shouldNotifyForMessage(
     senderEmail: String,
@@ -105,6 +187,7 @@ object MailRulesStore {
     private const val KEY_MUTED_FOLDERS = "rules_muted_folders"
     private const val KEY_MUTED_SENDERS = "rules_muted_senders"
     private const val KEY_CUSTOM_TAGS = "rules_custom_tags"
+    private const val KEY_TAG_TEMPLATES = "rules_tag_templates"
     private const val KEY_SORT_RULES = "rules_tag_sort"
     private const val KEY_INBOX_ID = "rules_inbox_folder_id"
     private const val KEY_SWIPE_RIGHT = "gesture_swipe_right"
@@ -180,23 +263,69 @@ object MailRulesStore {
         return setSenderMuted(context, norm, muted = norm !in current)
     }
 
-    fun getCustomTags(context: Context): List<String> {
-        val raw = prefs(context).getString(KEY_CUSTOM_TAGS, null) ?: return emptyList()
+    fun getTagTemplates(context: Context): List<String> {
+        val p = prefs(context)
+        val raw = p.getString(KEY_TAG_TEMPLATES, null)
+        if (raw == null) {
+            // Migrate legacy custom tags cleanly alongside defaults once
+            val legacyRaw = p.getString(KEY_CUSTOM_TAGS, null)
+            val legacy = if (legacyRaw != null) {
+                runCatching {
+                    val arr = JSONArray(legacyRaw)
+                    (0 until arr.length()).mapNotNull { i ->
+                        arr.optString(i, "").trim().takeIf { it.isNotEmpty() }
+                    }
+                }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            return sortTagTemplatesHierarchically(DEFAULT_TAG_TEMPLATES + legacy)
+        }
         return runCatching {
             val arr = JSONArray(raw)
-            (0 until arr.length()).mapNotNull { i ->
+            val list = (0 until arr.length()).mapNotNull { i ->
                 arr.optString(i, "").trim().takeIf { it.isNotEmpty() }
-            }.distinctBy { it.lowercase() }
-        }.getOrDefault(emptyList())
+            }
+            sortTagTemplatesHierarchically(list)
+        }.getOrDefault(DEFAULT_TAG_TEMPLATES)
     }
 
-    fun addCustomTag(context: Context, tag: String): List<String> {
-        val clean = tag.trim().replace("[", "").replace("]", "").take(24)
-        if (clean.isEmpty()) return getCustomTags(context)
-        val next = (getCustomTags(context) + clean).distinctBy { it.lowercase() }
-        val arr = JSONArray().apply { next.forEach { put(it) } }
-        prefs(context).edit().putString(KEY_CUSTOM_TAGS, arr.toString()).apply()
-        return next
+    private fun saveTagTemplates(context: Context, templates: List<String>): List<String> {
+        val sorted = sortTagTemplatesHierarchically(templates)
+        val arr = JSONArray().apply { sorted.forEach { put(it) } }
+        prefs(context).edit().putString(KEY_TAG_TEMPLATES, arr.toString()).apply()
+        return sorted
+    }
+
+    fun addTagTemplate(context: Context, rawPath: String): List<String> {
+        val segs = parseTagPath(rawPath)
+        if (segs.isEmpty()) return getTagTemplates(context)
+        val additions = mutableListOf<String>()
+        for (len in 1..segs.size) {
+            additions += formatTagPath(segs.take(len))
+        }
+        return saveTagTemplates(context, getTagTemplates(context) + additions)
+    }
+
+    fun updateTagTemplate(context: Context, oldPath: String, newRawPath: String): List<String> {
+        val normOld = formatTagPath(parseTagPath(oldPath))
+        val normNew = formatTagPath(parseTagPath(newRawPath))
+        if (normOld.isEmpty() || normNew.isEmpty()) return getTagTemplates(context)
+        val updated = getTagTemplates(context).map { tpl ->
+            when {
+                tpl.equals(normOld, ignoreCase = true) -> normNew
+                tpl.startsWith("$normOld/", ignoreCase = true) ->
+                    normNew + tpl.substring(normOld.length)
+                else -> tpl
+            }
+        }
+        return saveTagTemplates(context, updated)
+    }
+
+    fun removeTagTemplate(context: Context, rawPath: String): List<String> {
+        val norm = formatTagPath(parseTagPath(rawPath))
+        val next = getTagTemplates(context).filterNot { it.equals(norm, ignoreCase = true) }
+        return saveTagTemplates(context, next)
     }
 
     fun getTagSortRules(context: Context): List<TagSortRule> {
@@ -205,11 +334,17 @@ object MailRulesStore {
             val arr = JSONArray(raw)
             (0 until arr.length()).mapNotNull { i ->
                 val obj = arr.optJSONObject(i) ?: return@mapNotNull null
-                val tag = obj.optString("tag", "").trim()
+                val tag = formatTagPath(parseTagPath(obj.optString("tag", "")))
                 val fid = obj.optString("folderId", "").trim()
                 val fname = obj.optString("folderName", "").trim()
+                val autoSub = obj.optBoolean("autoSubfolders", true)
                 if (tag.isEmpty() || fid.isEmpty()) null
-                else TagSortRule(tag = tag, targetFolderId = fid, targetFolderName = fname)
+                else TagSortRule(
+                    tag = tag,
+                    targetFolderId = fid,
+                    targetFolderName = fname,
+                    autoCreateSubfolders = autoSub
+                )
             }
         }.getOrDefault(emptyList())
     }
@@ -222,6 +357,7 @@ object MailRulesStore {
                     put("tag", r.tag)
                     put("folderId", r.targetFolderId)
                     put("folderName", r.targetFolderName)
+                    put("autoSubfolders", r.autoCreateSubfolders)
                 }
             )
         }
@@ -229,16 +365,17 @@ object MailRulesStore {
     }
 
     fun upsertTagSortRule(context: Context, rule: TagSortRule): List<TagSortRule> {
-        val cleanTag = rule.tag.trim().replace("[", "").replace("]", "").take(24)
-        if (cleanTag.isEmpty() || rule.targetFolderId.isBlank()) return getTagSortRules(context)
-        val filtered = getTagSortRules(context).filterNot { it.tag.equals(cleanTag, ignoreCase = true) }
-        val next = filtered + rule.copy(tag = cleanTag)
+        val cleanPath = formatTagPath(rule.pathSegments())
+        if (cleanPath.isEmpty() || rule.targetFolderId.isBlank()) return getTagSortRules(context)
+        val filtered = getTagSortRules(context).filterNot { it.tag.equals(cleanPath, ignoreCase = true) }
+        val next = (filtered + rule.copy(tag = cleanPath)).sortedBy { it.tag.lowercase() }
         saveTagSortRules(context, next)
         return next
     }
 
     fun removeTagSortRule(context: Context, tag: String): List<TagSortRule> {
-        val next = getTagSortRules(context).filterNot { it.tag.equals(tag.trim(), ignoreCase = true) }
+        val cleanPath = formatTagPath(parseTagPath(tag))
+        val next = getTagSortRules(context).filterNot { it.tag.equals(cleanPath, ignoreCase = true) }
         saveTagSortRules(context, next)
         return next
     }

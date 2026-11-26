@@ -46,8 +46,10 @@ import ru.nstu.mail.data.CredentialStore
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
+import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.MailRulesStore
-import ru.nstu.mail.data.matchAutoSortRule
+import ru.nstu.mail.data.TagMatchResult
+import ru.nstu.mail.data.matchAutoSortRuleDetailed
 import ru.nstu.mail.data.shouldNotifyForMessage
 import java.util.concurrent.TimeUnit
 
@@ -379,6 +381,57 @@ object MailNotificationHelper {
             .apply()
     }
 
+    suspend fun resolveAndMoveForTagRule(
+        context: Context,
+        client: EwsClient,
+        msg: EmailSummary,
+        match: TagMatchResult,
+        foldersCache: MutableList<MailFolder>? = null
+    ): Pair<String?, List<MailFolder>?> {
+        var targetId = match.rule.targetFolderId
+        var updatedFolders: List<MailFolder>? = null
+
+        if (match.rule.autoCreateSubfolders && match.remainingSubtags.isNotEmpty()) {
+            val workingFolders = foldersCache ?: runCatching { client.getFolders().toMutableList() }.getOrNull()
+            if (workingFolders != null) {
+                for (subSeg in match.remainingSubtags.take(3)) {
+                    val safeName = subSeg.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(24)
+                    if (safeName.isEmpty()) break
+                    var child = workingFolders.firstOrNull {
+                        it.parentId == targetId && it.displayName.equals(safeName, ignoreCase = true)
+                    }
+                    if (child == null) {
+                        val created = runCatching {
+                            client.createFolder(safeName, parentFolderId = targetId)
+                            client.getFolders()
+                        }.getOrNull()
+                        if (created != null) {
+                            workingFolders.clear()
+                            workingFolders.addAll(created)
+                            updatedFolders = created
+                            child = workingFolders.firstOrNull {
+                                it.parentId == targetId && it.displayName.equals(safeName, ignoreCase = true)
+                            }
+                            if (child != null && targetId in MailRulesStore.getMutedFolderIds(context)) {
+                                MailRulesStore.setFolderMuted(context, child.id, muted = true)
+                            }
+                        }
+                    }
+                    if (child != null) {
+                        targetId = child.id
+                    } else {
+                        break
+                    }
+                }
+            }
+        }
+
+        val moved = runCatching {
+            client.moveMessages(listOf(msg.id to msg.changeKey), targetId)
+        }.isSuccess
+        return if (moved) targetId to updatedFolders else null to updatedFolders
+    }
+
     suspend fun fetchUnreadAndNotify(context: Context, client: EwsClient) {
         val unread = client.listInboxUnread(pageSize = 15)
         val existing = getSeenIds(context)
@@ -389,25 +442,29 @@ object MailNotificationHelper {
         if (toProcess.isEmpty()) return
 
         val rules = MailRulesStore.getTagSortRules(context)
-        val mutedFolders = MailRulesStore.getMutedFolderIds(context)
+        val mutedFolders = MailRulesStore.getMutedFolderIds(context).toMutableSet()
         val mutedSenders = MailRulesStore.getMutedSenders(context)
         val savedInboxId = MailRulesStore.getInboxFolderId(context)
+        var foldersCache: MutableList<MailFolder>? = null
 
         val toNotify = mutableListOf<EmailSummary>()
         for (msg in toProcess) {
-            val matchedRule = matchAutoSortRule(msg.subject, rules)
+            val matched = matchAutoSortRuleDetailed(msg.subject, rules)
             var effectiveFolderId = savedInboxId
             var inInbox = true
-            if (matchedRule != null &&
-                matchedRule.targetFolderId.isNotBlank() &&
-                matchedRule.targetFolderId != savedInboxId
+            if (matched != null &&
+                matched.rule.targetFolderId.isNotBlank() &&
+                matched.rule.targetFolderId != savedInboxId
             ) {
-                val moved = runCatching {
-                    client.moveMessages(listOf(msg.id to msg.changeKey), matchedRule.targetFolderId)
-                }.isSuccess
-                if (moved) {
-                    effectiveFolderId = matchedRule.targetFolderId
+                if (foldersCache == null && matched.rule.autoCreateSubfolders && matched.remainingSubtags.isNotEmpty()) {
+                    foldersCache = runCatching { client.getFolders().toMutableList() }.getOrNull()
+                }
+                val (movedFolderId, _) = resolveAndMoveForTagRule(context, client, msg, matched, foldersCache)
+                if (!movedFolderId.isNullOrBlank()) {
+                    effectiveFolderId = movedFolderId
                     inInbox = false
+                    mutedFolders.clear()
+                    mutedFolders.addAll(MailRulesStore.getMutedFolderIds(context))
                 }
             }
             if (shouldNotifyForMessage(

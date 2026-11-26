@@ -52,8 +52,10 @@ import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UpdateChannel
-import ru.nstu.mail.data.matchAutoSortRule
+import ru.nstu.mail.data.formatTagPath
+import ru.nstu.mail.data.matchAutoSortRuleDetailed
 import ru.nstu.mail.data.parseFormattedRecipient
+import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.notify.MailNotificationHelper
 import ru.nstu.mail.notify.NotificationMode
 import java.io.File
@@ -138,8 +140,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     private val _mutedSenders = MutableStateFlow(MailRulesStore.getMutedSenders(application))
     val mutedSenders: StateFlow<Set<String>> = _mutedSenders.asStateFlow()
 
-    private val _customTags = MutableStateFlow(MailRulesStore.getCustomTags(application))
-    val customTags: StateFlow<List<String>> = _customTags.asStateFlow()
+    private val _tagTemplates = MutableStateFlow(MailRulesStore.getTagTemplates(application))
+    val tagTemplates: StateFlow<List<String>> = _tagTemplates.asStateFlow()
 
     private val _tagSortRules = MutableStateFlow(MailRulesStore.getTagSortRules(application))
     val tagSortRules: StateFlow<List<TagSortRule>> = _tagSortRules.asStateFlow()
@@ -321,21 +323,36 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addCustomTag(tag: String) {
-        _customTags.value = MailRulesStore.addCustomTag(getApplication(), tag)
+    fun addTagTemplate(path: String) {
+        _tagTemplates.value = MailRulesStore.addTagTemplate(getApplication(), path)
     }
 
-    fun saveTagSortRule(tag: String, targetFolder: MailFolder) {
+    fun updateTagTemplate(oldPath: String, newPath: String) {
+        _tagTemplates.value = MailRulesStore.updateTagTemplate(getApplication(), oldPath, newPath)
+    }
+
+    fun removeTagTemplate(path: String) {
+        _tagTemplates.value = MailRulesStore.removeTagTemplate(getApplication(), path)
+    }
+
+    fun saveTagSortRule(
+        tag: String,
+        targetFolder: MailFolder,
+        autoCreateSubfolders: Boolean = true
+    ) {
         val app = getApplication<Application>()
+        val cleanPath = formatTagPath(parseTagPath(tag))
+        if (cleanPath.isEmpty()) return
         val rule = TagSortRule(
-            tag = tag.trim(),
+            tag = cleanPath,
             targetFolderId = targetFolder.id,
-            targetFolderName = targetFolder.displayName
+            targetFolderName = targetFolder.displayName,
+            autoCreateSubfolders = autoCreateSubfolders
         )
         _tagSortRules.value = MailRulesStore.upsertTagSortRule(app, rule)
-        _customTags.value = MailRulesStore.addCustomTag(app, rule.tag)
+        _tagTemplates.value = MailRulesStore.addTagTemplate(app, cleanPath)
         _state.update {
-            it.copy(toastMessage = "Тег [${rule.tag}] → «${targetFolder.displayName}»")
+            it.copy(toastMessage = "Тег [$cleanPath] → «${targetFolder.displayName}»")
         }
         val c = client
         val cur = _state.value.currentFolder
@@ -940,25 +957,39 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         if (rules.isEmpty() || items.isEmpty()) return
         val inboxId = currentFolder.id
 
-        val byTarget = mutableMapOf<String, MutableList<EmailSummary>>()
-        for (item in items) {
-            val matched = matchAutoSortRule(item.subject, rules) ?: continue
-            if (matched.targetFolderId.isNotBlank() && matched.targetFolderId != inboxId) {
-                byTarget.getOrPut(matched.targetFolderId) { mutableListOf() }.add(item)
+        val pending = items.mapNotNull { item ->
+            val matched = matchAutoSortRuleDetailed(item.subject, rules) ?: return@mapNotNull null
+            if (matched.rule.targetFolderId.isBlank() || matched.rule.targetFolderId == inboxId) {
+                return@mapNotNull null
             }
+            item to matched
         }
-        if (byTarget.isEmpty()) return
+        if (pending.isEmpty()) return
 
+        val app = getApplication<Application>()
         viewModelScope.launch {
+            val foldersCache = _state.value.folders.toMutableList()
             val movedIds = mutableSetOf<String>()
-            for ((targetId, list) in byTarget) {
-                runCatching {
-                    c.moveMessages(list.map { it.id to it.changeKey }, targetId)
-                    movedIds.addAll(list.map { it.id })
+            var folderListChanged = false
+
+            for ((item, matched) in pending) {
+                val (movedFolderId, refreshedFolders) = MailNotificationHelper.resolveAndMoveForTagRule(
+                    context = app,
+                    client = c,
+                    msg = item,
+                    match = matched,
+                    foldersCache = foldersCache
+                )
+                if (refreshedFolders != null) {
+                    folderListChanged = true
+                }
+                if (!movedFolderId.isNullOrBlank()) {
+                    movedIds += item.id
                 }
             }
-            if (movedIds.isNotEmpty()) {
+            if (movedIds.isNotEmpty() || folderListChanged) {
                 val folders = runCatching { c.getFolders() }.getOrNull()
+                _mutedFolderIds.value = MailRulesStore.getMutedFolderIds(app)
                 _state.update { st ->
                     st.copy(
                         folders = folders ?: st.folders,

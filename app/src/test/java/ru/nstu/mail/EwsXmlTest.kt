@@ -20,12 +20,14 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractAllTagsForMatching
 import ru.nstu.mail.data.extractSubjectTags
 import ru.nstu.mail.data.formatSubjectWithTags
-import ru.nstu.mail.data.matchAutoSortRule
+import ru.nstu.mail.data.matchAutoSortRuleDetailed
 import ru.nstu.mail.data.participants
 import ru.nstu.mail.data.shouldNotifyForMessage
+import ru.nstu.mail.data.sortTagTemplatesHierarchically
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.selectNewMessagesToNotify
 import ru.nstu.mail.ui.extractInitials
@@ -725,26 +727,55 @@ class EwsXmlTest {
 
     @Test
     fun `subject tags, auto-sort rules, and notification filters work together`() {
-        val (tags, clean) = extractSubjectTags("[ПЗ] [Лаба] Отчёт по работе")
-        assertEquals(listOf("ПЗ", "Лаба"), tags)
-        assertEquals("Отчёт по работе", clean)
+        assertEquals(
+            """Отчёт по работе ["1", "2"]""",
+            formatSubjectWithTags("Отчёт по работе", listOf("1", "2"))
+        )
+        assertEquals(
+            """Отчёт ["1", "2", "3"]""",
+            formatSubjectWithTags("""Отчёт ["1"]""", listOf("1", "2", "3"))
+        )
+        assertEquals("Обычная тема", formatSubjectWithTags("Обычная тема", emptyList()))
 
-        assertEquals("[ПЗ] [Лаба] Отчёт", formatSubjectWithTags("[ПЗ] Отчёт", listOf("ПЗ", "Лаба", "пз")))
-        assertEquals(listOf("ПЗ", "Срочно"), extractAllTagsForMatching("Re: Отчёт [ПЗ] #Срочно"))
+        val (tags, clean) = extractSubjectTags("""Re: Отчёт ["1", "2"]""")
+        assertEquals(listOf("1", "2"), tags)
+        assertEquals("Re: Отчёт", clean)
 
-        val rules = listOf(TagSortRule(tag = "пз", targetFolderId = "f_pz", targetFolderName = "Практика"))
-        val matched = matchAutoSortRule("[ПЗ] Задание 3", rules)
-        assertEquals("f_pz", matched?.targetFolderId)
-        assertNull(matchAutoSortRule("[Лекция] Слайды", rules))
+        // Legacy fallback keeps working
+        val (legacyTags, legacyClean) = extractSubjectTags("[ПЗ] Старый формат")
+        assertEquals(listOf("ПЗ"), legacyTags)
+        assertEquals("Старый формат", legacyClean)
+
+        assertEquals(listOf("1", "2"), extractAllTagsForMatching("""Письмо ["1", "2"]"""))
+        assertEquals(listOf("ПЗ", "Срочно"), extractAllTagsForMatching("Re: Отчёт #ПЗ/Срочно"))
+
+        val rules = listOf(
+            TagSortRule(tag = "1", targetFolderId = "f_1", targetFolderName = "Папка 1", autoCreateSubfolders = true),
+            TagSortRule(tag = "1/2", targetFolderId = "f_1_2", targetFolderName = "Папка 2", autoCreateSubfolders = true)
+        )
+        val exactMatch = matchAutoSortRuleDetailed("""Задание ["1", "2"]""", rules)
+        assertEquals("f_1_2", exactMatch?.rule?.targetFolderId)
+        assertTrue(exactMatch?.remainingSubtags?.isEmpty() == true)
+
+        val branchMatch = matchAutoSortRuleDetailed("""Задание ["1", "3", "А"]""", rules)
+        assertEquals("f_1", branchMatch?.rule?.targetFolderId)
+        assertEquals(listOf("3", "А"), branchMatch?.remainingSubtags)
+
+        assertNull(matchAutoSortRuleDetailed("""Задание ["9"]""", rules))
+        assertNull(matchAutoSortRuleDetailed("Обычное письмо Outlook", rules))
+
+        val templates = sortTagTemplatesHierarchically(listOf("1/2", "1/3", "1", "Важно"))
+        assertEquals(listOf("1", "Важно"), childTagsForPrefix(templates, emptyList()))
+        assertEquals(listOf("2", "3"), childTagsForPrefix(templates, listOf("1")))
 
         // Sorted to muted folder -> no notification
         assertFalse(
             shouldNotifyForMessage(
                 senderEmail = "prof@corp.nstu.ru",
-                effectiveFolderId = "f_pz",
+                effectiveFolderId = "f_1_2",
                 isInbox = false,
                 savedInboxFolderId = "f_inbox",
-                mutedFolderIds = setOf("f_pz"),
+                mutedFolderIds = setOf("f_1_2"),
                 mutedSenders = emptySet()
             )
         )
@@ -752,7 +783,7 @@ class EwsXmlTest {
         assertTrue(
             shouldNotifyForMessage(
                 senderEmail = "prof@corp.nstu.ru",
-                effectiveFolderId = "f_pz",
+                effectiveFolderId = "f_1",
                 isInbox = false,
                 savedInboxFolderId = "f_inbox",
                 mutedFolderIds = setOf("f_inbox", "inbox"),
@@ -763,7 +794,7 @@ class EwsXmlTest {
         assertFalse(
             shouldNotifyForMessage(
                 senderEmail = "Prof@corp.nstu.ru ",
-                effectiveFolderId = "f_pz",
+                effectiveFolderId = "f_1",
                 isInbox = false,
                 savedInboxFolderId = "f_inbox",
                 mutedFolderIds = emptySet(),
@@ -777,7 +808,7 @@ class EwsXmlTest {
                 effectiveFolderId = "f_inbox",
                 isInbox = true,
                 savedInboxFolderId = "f_inbox",
-                mutedFolderIds = setOf("f_pz"),
+                mutedFolderIds = setOf("f_1"),
                 mutedSenders = emptySet()
             )
         )

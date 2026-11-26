@@ -78,6 +78,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -122,7 +123,7 @@ fun MailListScreen(
     knownNames: Map<String, String>,
     mutedFolderIds: Set<String>,
     tagSortRules: List<TagSortRule>,
-    availableTags: List<String>,
+    tagTemplates: List<String>,
     swipeRightAction: SwipeAction,
     swipeLeftAction: SwipeAction,
     onRequestAvatar: (String) -> Unit,
@@ -141,7 +142,7 @@ fun MailListScreen(
     onMoveSummary: (EmailSummary, MailFolder) -> Unit,
     onToggleSpamSummary: (EmailSummary) -> Unit,
     onToggleFolderNotifications: (MailFolder) -> Unit,
-    onSaveTagSortRule: (tag: String, folder: MailFolder) -> Unit,
+    onSaveTagSortRule: (tag: String, folder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
     onRemoveTagSortRule: (tag: String) -> Unit,
     onBatchSetRead: (Boolean) -> Unit,
     onBatchMove: (MailFolder) -> Unit,
@@ -215,12 +216,12 @@ fun MailListScreen(
     quickRuleFolder?.let { targetFolder ->
         AddTagRuleDialog(
             folders = state.folders,
-            availableTags = availableTags,
+            tagTemplates = tagTemplates,
             fixedFolder = targetFolder,
             onDismiss = { quickRuleFolder = null },
-            onConfirm = { tag, chosen ->
+            onConfirm = { tag, chosen, autoSub ->
                 quickRuleFolder = null
-                onSaveTagSortRule(tag, chosen)
+                onSaveTagSortRule(tag, chosen, autoSub)
             }
         )
     }
@@ -229,7 +230,7 @@ fun MailListScreen(
         TagSortRulesDialog(
             folders = state.folders,
             rules = tagSortRules,
-            availableTags = availableTags,
+            tagTemplates = tagTemplates,
             mutedFolderIds = mutedFolderIds,
             onSaveRule = onSaveTagSortRule,
             onRemoveRule = onRemoveTagSortRule,
@@ -1111,18 +1112,16 @@ private fun EmailRow(
                                 .padding(bottom = 2.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            tags.take(3).forEach { tag ->
-                                Surface(
-                                    color = MaterialTheme.colorScheme.secondaryContainer,
-                                    shape = RoundedCornerShape(6.dp)
-                                ) {
-                                    Text(
-                                        text = tag,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
-                                    )
-                                }
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = tags.joinToString(" › "),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                )
                             }
                         }
                     }
@@ -1249,9 +1248,9 @@ private fun FolderNameDialog(
 private fun TagSortRulesDialog(
     folders: List<MailFolder>,
     rules: List<TagSortRule>,
-    availableTags: List<String>,
+    tagTemplates: List<String>,
     mutedFolderIds: Set<String>,
-    onSaveRule: (tag: String, folder: MailFolder) -> Unit,
+    onSaveRule: (tag: String, folder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
     onRemoveRule: (tag: String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1260,12 +1259,12 @@ private fun TagSortRulesDialog(
     if (showAdd) {
         AddTagRuleDialog(
             folders = folders,
-            availableTags = availableTags,
+            tagTemplates = tagTemplates,
             fixedFolder = null,
             onDismiss = { showAdd = false },
-            onConfirm = { tag, folder ->
+            onConfirm = { tag, folder, autoSub ->
                 showAdd = false
-                onSaveRule(tag, folder)
+                onSaveRule(tag, folder, autoSub)
             }
         )
     }
@@ -1282,13 +1281,14 @@ private fun TagSortRulesDialog(
             ) {
                 if (rules.isEmpty()) {
                     Text(
-                        text = "Правил пока нет. Письма с тегом (например [ПЗ]) будут автоматически перемещаться в выбранную папку.",
+                        text = "Правил пока нет. Письма с тегом (например [\"1\", \"2\"]) будут автоматически перемещаться в выбранную папку и её подпапки.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
                     rules.forEach { rule ->
                         val muted = rule.targetFolderId in mutedFolderIds
+                        val segPreview = rule.pathSegments().joinToString(", ", "[", "]") { "\"$it\"" }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1298,12 +1298,15 @@ private fun TagSortRulesDialog(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "[${rule.tag}] → ${rule.targetFolderName}",
+                                    text = "$segPreview → ${rule.targetFolderName}",
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
-                                    text = if (muted) "Уведомления в папке выкл." else "Уведомления в папке вкл.",
+                                    text = buildString {
+                                        append(if (rule.autoCreateSubfolders) "С подпапками · " else "Только папка · ")
+                                        append(if (muted) "Уведомления выкл." else "Уведомления вкл.")
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1336,15 +1339,19 @@ private fun TagSortRulesDialog(
 @Composable
 internal fun AddTagRuleDialog(
     folders: List<MailFolder>,
-    availableTags: List<String>,
+    tagTemplates: List<String>,
     fixedFolder: MailFolder?,
     onDismiss: () -> Unit,
-    onConfirm: (tag: String, targetFolder: MailFolder) -> Unit
+    onConfirm: (tag: String, targetFolder: MailFolder, autoCreateSubfolders: Boolean) -> Unit
 ) {
-    val allTags = remember(availableTags) {
-        (ru.nstu.mail.data.DEFAULT_TAGS + availableTags).distinctBy { it.lowercase() }
+    val allTags = remember(tagTemplates) {
+        (ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES + tagTemplates)
+            .map { ru.nstu.mail.data.formatTagPath(ru.nstu.mail.data.parseTagPath(it)) }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
     }
     var tagText by remember { mutableStateOf(allTags.firstOrNull().orEmpty()) }
+    var autoCreateSubfolders by remember { mutableStateOf(true) }
     var selectedFolder by remember {
         mutableStateOf(
             fixedFolder
@@ -1366,13 +1373,13 @@ internal fun AddTagRuleDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 380.dp)
+                    .heightIn(max = 400.dp)
                     .verticalScroll(rememberScrollState())
             ) {
                 OutlinedTextField(
                     value = tagText,
-                    onValueChange = { tagText = it.take(24) },
-                    label = { Text("Тег (напр. ПЗ)") },
+                    onValueChange = { tagText = it.take(80) },
+                    label = { Text("Тег или путь (напр. 1 или 1/2)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -1387,9 +1394,31 @@ internal fun AddTagRuleDialog(
                         FilterChip(
                             selected = tagText.equals(t, ignoreCase = true),
                             onClick = { tagText = t },
-                            label = { Text(t) }
+                            label = { Text(t.replace("/", " › ")) }
                         )
                     }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { autoCreateSubfolders = !autoCreateSubfolders }
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("Ветвление подпапок", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Для [\"1\", \"2\"] создаст подпапку «2» внутри целевой",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = autoCreateSubfolders,
+                        onCheckedChange = { autoCreateSubfolders = it }
+                    )
                 }
                 if (fixedFolder == null) {
                     Spacer(Modifier.height(10.dp))
@@ -1437,9 +1466,10 @@ internal fun AddTagRuleDialog(
             TextButton(
                 onClick = {
                     val target = fixedFolder ?: selectedFolder ?: return@TextButton
-                    onConfirm(tagText.trim(), target)
+                    onConfirm(tagText.trim(), target, autoCreateSubfolders)
                 },
-                enabled = tagText.isNotBlank() && (fixedFolder != null || selectedFolder != null)
+                enabled = ru.nstu.mail.data.parseTagPath(tagText).isNotEmpty() &&
+                    (fixedFolder != null || selectedFolder != null)
             ) {
                 Text("Сохранить")
             }
