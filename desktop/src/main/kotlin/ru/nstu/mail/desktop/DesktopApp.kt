@@ -110,16 +110,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -135,9 +132,7 @@ import org.jsoup.Jsoup
 import ru.nstu.mail.data.CalendarEvent
 import ru.nstu.mail.data.ContactEntry
 import ru.nstu.mail.data.DEFAULT_SERVER_URL
-import ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES
 import ru.nstu.mail.data.EmailDetail
-import ru.nstu.mail.data.EmailHtmlSanitizer
 import ru.nstu.mail.data.EmailParticipant
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.MailFilter
@@ -162,17 +157,10 @@ import ru.nstu.mail.data.participants
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
 import ru.nstu.mail.data.splitEmails
-import java.awt.BorderLayout
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
-import javax.swing.JEditorPane
 import javax.swing.JFileChooser
-import javax.swing.JPanel
-import javax.swing.JScrollPane
-import javax.swing.ScrollPaneConstants
-import javax.swing.SwingUtilities
-import javax.swing.event.HyperlinkEvent
 
 @Composable
 fun DesktopRootScreen(
@@ -231,8 +219,7 @@ fun DesktopRootScreen(
                     avatars = avatars,
                     profiles = profiles,
                     knownNames = knownNames,
-                    loadingProfiles = loadingProfiles,
-                    hasRootOverlay = state.availableUpdate != null
+                    loadingProfiles = loadingProfiles
                 )
             }
         }
@@ -319,8 +306,7 @@ private fun DesktopWorkspace(
     avatars: Map<String, ImageBitmap?>,
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
-    loadingProfiles: Set<String>,
-    hasRootOverlay: Boolean
+    loadingProfiles: Set<String>
 ) {
     var otherExpanded by remember { mutableStateOf(false) }
     var sidebarVisibleCompact by remember { mutableStateOf(true) }
@@ -331,8 +317,6 @@ private fun DesktopWorkspace(
     var moveMessageTarget by remember { mutableStateOf<EmailDetail?>(null) }
     var selectedPerson by remember { mutableStateOf<EmailParticipant?>(null) }
     var topFolderMenuOpen by remember { mutableStateOf(false) }
-    var openFolderMenuCount by remember { mutableStateOf(0) }
-    var detailOverlayOpen by remember { mutableStateOf(false) }
     var searchDraft by remember(state.searchQuery) { mutableStateOf(state.searchQuery) }
 
     fun isMuted(f: MailFolder?): Boolean {
@@ -340,17 +324,6 @@ private fun DesktopWorkspace(
         val muted = state.settings.mutedFolderIds
         return f.id in muted || (f.systemKind == SystemFolderKind.INBOX && "inbox" in muted)
     }
-
-    val anyOverlayOpen = hasRootOverlay ||
-        createFolderParent.first ||
-        renameTarget != null ||
-        deleteFolderTarget != null ||
-        confirmEmptyFolder ||
-        moveMessageTarget != null ||
-        selectedPerson != null ||
-        topFolderMenuOpen ||
-        openFolderMenuCount > 0 ||
-        detailOverlayOpen
 
     if (createFolderParent.first) {
         FolderNameDialog(
@@ -532,9 +505,6 @@ private fun DesktopWorkspace(
                     val deletedFolder = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }
                     val systemFolders = state.folders.filter { it.isSystem && it.systemKind != SystemFolderKind.DELETED }
                     val customFolders = state.folders.filterNot { it.isSystem || it.id == unsortedFolder?.id }
-                    val onMenuToggle: (Boolean) -> Unit = { opened ->
-                        openFolderMenuCount = (openFolderMenuCount + if (opened) 1 else -1).coerceAtLeast(0)
-                    }
 
                     var unsortedDone = false
                     systemFolders.forEach { folder ->
@@ -543,8 +513,7 @@ private fun DesktopWorkspace(
                                 onSelect = { controller.selectFolder(unsortedFolder) },
                                 onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
                                 onAutoSort = null,
-                                onCreateSub = { createFolderParent = true to unsortedFolder },
-                                onMenuExpandedChanged = onMenuToggle
+                                onCreateSub = { createFolderParent = true to unsortedFolder }
                             )
                             unsortedDone = true
                         }
@@ -552,16 +521,14 @@ private fun DesktopWorkspace(
                             onSelect = { controller.selectFolder(folder) },
                             onToggleMute = { controller.toggleFolderNotifications(folder) },
                             onAutoSort = null,
-                            onCreateSub = { createFolderParent = true to folder },
-                            onMenuExpandedChanged = onMenuToggle
+                            onCreateSub = { createFolderParent = true to folder }
                         )
                         if (unsortedFolder != null && !unsortedDone && folder.systemKind == SystemFolderKind.INBOX) {
                             SidebarFolderRow(unsortedFolder.copy(depth = 0), state.currentFolder?.id == unsortedFolder.id, isMuted(unsortedFolder), false,
                                 onSelect = { controller.selectFolder(unsortedFolder) },
                                 onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
                                 onAutoSort = null,
-                                onCreateSub = { createFolderParent = true to unsortedFolder },
-                                onMenuExpandedChanged = onMenuToggle
+                                onCreateSub = { createFolderParent = true to unsortedFolder }
                             )
                             unsortedDone = true
                         }
@@ -571,8 +538,7 @@ private fun DesktopWorkspace(
                             onSelect = { controller.selectFolder(unsortedFolder) },
                             onToggleMute = { controller.toggleFolderNotifications(unsortedFolder) },
                             onAutoSort = null,
-                            onCreateSub = { createFolderParent = true to unsortedFolder },
-                            onMenuExpandedChanged = onMenuToggle
+                            onCreateSub = { createFolderParent = true to unsortedFolder }
                         )
                     }
 
@@ -598,8 +564,7 @@ private fun DesktopWorkspace(
                                 onAutoSort = { controller.enableAutoSortForFolderTree(folder) },
                                 onCreateSub = { createFolderParent = true to folder },
                                 onRename = { renameTarget = folder },
-                                onDelete = { deleteFolderTarget = folder },
-                                onMenuExpandedChanged = onMenuToggle
+                                onDelete = { deleteFolderTarget = folder }
                             )
                         }
                     }
@@ -618,8 +583,7 @@ private fun DesktopWorkspace(
                                     onSelect = { controller.selectFolder(del) },
                                     onToggleMute = { controller.toggleFolderNotifications(del) },
                                     onAutoSort = null,
-                                    onCreateSub = { createFolderParent = true to del },
-                                    onMenuExpandedChanged = onMenuToggle
+                                    onCreateSub = { createFolderParent = true to del }
                                 )
                             }
                             SidebarNavRow(Icons.Default.People, "Контакты и адресная книга", state.rightPane is DesktopRightPane.Contacts, controller::openContacts)
@@ -811,8 +775,6 @@ private fun DesktopWorkspace(
                                     profiles = profiles,
                                     knownNames = knownNames,
                                     showCompactBack = showRightOnlyInCompact,
-                                    parentOverlayOpen = anyOverlayOpen,
-                                    onOverlayChanged = { detailOverlayOpen = it },
                                     onBackCompact = controller::closeRightPane,
                                     onRequestAvatar = controller::requestAvatar,
                                     onRequestProfile = controller::requestPersonProfile,
@@ -921,14 +883,9 @@ private fun SidebarFolderRow(
     onAutoSort: (() -> Unit)?,
     onCreateSub: () -> Unit,
     onRename: (() -> Unit)? = null,
-    onDelete: (() -> Unit)? = null,
-    onMenuExpandedChanged: (Boolean) -> Unit = {}
+    onDelete: (() -> Unit)? = null
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    androidx.compose.runtime.DisposableEffect(menuOpen) {
-        if (menuOpen) onMenuExpandedChanged(true)
-        onDispose { if (menuOpen) onMenuExpandedChanged(false) }
-    }
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     Row(
         modifier = Modifier
@@ -1058,8 +1015,6 @@ private fun DesktopMessageDetailPane(
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
     showCompactBack: Boolean,
-    parentOverlayOpen: Boolean,
-    onOverlayChanged: (Boolean) -> Unit,
     onBackCompact: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestProfile: (String, String) -> Unit,
@@ -1079,13 +1034,6 @@ private fun DesktopMessageDetailPane(
 ) {
     var forceLight by remember(detail.id, defaultLightBody) { mutableStateOf(defaultLightBody) }
     var confirmDelete by remember { mutableStateOf(false) }
-
-    LaunchedEffect(confirmDelete) {
-        onOverlayChanged(confirmDelete)
-    }
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { onOverlayChanged(false) }
-    }
 
     if (confirmDelete) {
         AlertDialog(
@@ -1214,100 +1162,21 @@ private fun DesktopMessageDetailPane(
         }
         HorizontalDivider()
         val effectiveDark = darkTheme && !forceLight
-        val bgHex = if (effectiveDark) "#101512" else "#FFFFFF"
-        val fgHex = if (effectiveDark) "#E0E4E0" else "#000000"
-        val linkHex = if (effectiveDark) "#5CDAA5" else "#006B47"
         val bgColor = if (effectiveDark) Color(0xFF101512) else Color.White
         val fgColor = if (effectiveDark) Color(0xFFE0E4E0) else Color.Black
-        val fontScale = LocalDensity.current.fontScale.coerceIn(0.85f, 2.0f)
-        val baseHtml = remember(detail.id, detail.body, detail.isHtml, effectiveDark) {
-            EmailHtmlSanitizer.renderEmailDocument(
-                body = detail.body,
-                isHtml = detail.isHtml,
-                darkMode = effectiveDark,
-                bgHex = bgHex,
-                textHex = fgHex,
-                linkHex = linkHex
-            )
-        }
-        val scaledPx = (15 * fontScale).toInt()
-        val htmlDoc = remember(baseHtml, scaledPx) {
-            baseHtml.replace("font-size: 15px;", "font-size: ${scaledPx}px;")
-        }
-        val savedScrollY = remember(detail.id) { intArrayOf(0) }
-        val hideHeavyweightWebView = parentOverlayOpen || confirmDelete
+        val linkColor = if (effectiveDark) Color(0xFF5CDAA5) else Color(0xFF006B47)
 
-        if (hideHeavyweightWebView) {
-            val plainPreview = remember(detail.id, detail.body, detail.isHtml) {
-                if (detail.isHtml) Jsoup.parse(detail.body).text() else detail.body
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .background(bgColor)
-                    .padding(16.dp)
-            ) {
-                Text(
-                    text = plainPreview,
-                    color = fgColor,
-                    style = MaterialTheme.typography.bodyMedium,
-                    overflow = TextOverflow.Clip
-                )
-            }
-        } else {
-            SwingPanel(
-                background = bgColor,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                factory = {
-                    val editor = JEditorPane().apply {
-                        contentType = "text/html"
-                        isEditable = false
-                        background = java.awt.Color(bgColor.toArgb())
-                        foreground = java.awt.Color(fgColor.toArgb())
-                        putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
-                        addHyperlinkListener { ev ->
-                            if (ev.eventType == HyperlinkEvent.EventType.ACTIVATED) {
-                                ev.url?.toString()?.let(onOpenUrl)
-                            }
-                        }
-                    }
-                    val scroll = JScrollPane(
-                        editor,
-                        ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
-                        ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
-                    ).apply { border = null }
-                    scroll.verticalScrollBar.addAdjustmentListener { ev ->
-                        if (!ev.valueIsAdjusting) {
-                            savedScrollY[0] = ev.value
-                        }
-                    }
-                    JPanel(BorderLayout()).apply {
-                        add(scroll, BorderLayout.CENTER)
-                        putClientProperty("editor", editor)
-                        putClientProperty("scroll", scroll)
-                    }
-                },
-                update = { panel ->
-                    val editor = panel.getClientProperty("editor") as? JEditorPane ?: return@SwingPanel
-                    val scroll = panel.getClientProperty("scroll") as? JScrollPane
-                    editor.background = java.awt.Color(bgColor.toArgb())
-                    editor.foreground = java.awt.Color(fgColor.toArgb())
-                    if (editor.getClientProperty("lastDoc") != htmlDoc) {
-                        editor.putClientProperty("lastDoc", htmlDoc)
-                        editor.text = htmlDoc
-                        val restoreY = savedScrollY[0]
-                        SwingUtilities.invokeLater {
-                            if (restoreY > 0 && scroll != null) {
-                                scroll.verticalScrollBar.value = restoreY
-                            } else {
-                                editor.caretPosition = 0
-                            }
-                        }
-                    }
-                }
-            )
-        }
+        DesktopEmailBodyViewer(
+            messageKey = detail.id,
+            body = detail.body,
+            isHtml = detail.isHtml,
+            darkMode = effectiveDark,
+            bgColor = bgColor,
+            fgColor = fgColor,
+            linkColor = linkColor,
+            onOpenUrl = onOpenUrl,
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        )
     }
 }
 
@@ -2110,7 +1979,7 @@ private fun AddTagRuleDialog(
     onRemoveRule: ((String) -> Unit)?
 ) {
     val allTags = remember(tagTemplates) {
-        (DEFAULT_TAG_TEMPLATES + tagTemplates).map { formatTagPath(parseTagPath(it)) }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        tagTemplates.map { formatTagPath(parseTagPath(it)) }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
     }
     val startTag = initialTag?.takeIf { it.isNotBlank() } ?: allTags.firstOrNull().orEmpty()
     val startRule = remember(startTag, rules) { rules.firstOrNull { it.tag.equals(startTag, true) } }

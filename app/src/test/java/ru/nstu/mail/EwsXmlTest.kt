@@ -1374,5 +1374,6 @@ class EwsXmlTest {
         assertFalse(rendered.contains("color=\"gray\""))
         assertTrue(rendered.contains("#b71c1c"))
         assertTrue(rendered.contains("#ffffff"))
+        assertTrue(ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES.isEmpty())
     }
 }

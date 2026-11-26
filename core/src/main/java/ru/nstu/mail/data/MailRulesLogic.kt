@@ -23,7 +23,7 @@ enum class SwipeAction(val labelRu: String) {
     SPAM("В спам / Не спам")
 }
 
-val DEFAULT_TAG_TEMPLATES = listOf("Учёба", "Учёба/ПЗ", "Учёба/Лаба", "Учёба/Лекция", "Важно")
+val DEFAULT_TAG_TEMPLATES: List<String> = emptyList()
 val DEFAULT_TAGS = DEFAULT_TAG_TEMPLATES
 const val UNSORTED_FOLDER_NAME = "Несортированные"
 

@@ -1367,7 +1367,7 @@ internal fun AddTagRuleDialog(
     onRemoveRule: ((tag: String) -> Unit)? = null
 ) {
     val allTags = remember(tagTemplates) {
-        (ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES + tagTemplates)
+        tagTemplates
             .map { formatTagPath(parseTagPath(it)) }
             .filter { it.isNotEmpty() }
             .distinctBy { it.lowercase() }
