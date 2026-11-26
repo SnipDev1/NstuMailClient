@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -104,6 +105,7 @@ fun SettingsScreen(
     onRemoveTagTemplate: (String) -> Unit,
     onSaveTagSortRule: (tag: String, folder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
     onRemoveTagSortRule: (String) -> Unit,
+    onDeployTagHierarchy: (String) -> Unit,
     onSetSwipeRightAction: (SwipeAction) -> Unit,
     onSetSwipeLeftAction: (SwipeAction) -> Unit,
     onSetUpdateChannel: (UpdateChannel) -> Unit,
@@ -120,6 +122,7 @@ fun SettingsScreen(
         mutableStateOf(MailNotificationHelper.isIgnoringBatteryOptimizations(context))
     }
     var ruleTargetTag by remember { mutableStateOf<String?>(null) }
+    var deployHierarchyTarget by remember { mutableStateOf<String?>(null) }
     var editingTemplateTarget by remember { mutableStateOf<Pair<String?, String>?>(null) }
     var pickingSwipeRight by remember { mutableStateOf<Boolean?>(null) }
 
@@ -142,6 +145,49 @@ fun SettingsScreen(
                 }
             )
         }
+    }
+
+    deployHierarchyTarget?.let { rootPath ->
+        val branchPaths = remember(rootPath, tagTemplates) {
+            tagTemplates
+                .filter { it.equals(rootPath, true) || it.startsWith("$rootPath/", true) }
+                .ifEmpty { listOf(rootPath) }
+                .sortedWith(compareBy<String>({ parseTagPath(it).size }, { it.lowercase() }))
+        }
+        AlertDialog(
+            onDismissRequest = { deployHierarchyTarget = null },
+            title = { Text("Перенести иерархию в папки?") },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "В почте будут созданы недостающие папки и назначены правила автосортировки для:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    val baseDepth = parseTagPath(rootPath).size
+                    branchPaths.forEach { p ->
+                        val segs = parseTagPath(p)
+                        val relDepth = (segs.size - baseDepth).coerceAtLeast(0)
+                        Text(
+                            text = if (relDepth > 0) "↳ ${segs.last()}" else p,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (relDepth == 0) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier.padding(start = (relDepth * 14).dp, top = 2.dp, bottom = 2.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deployHierarchyTarget = null
+                    onDeployTagHierarchy(rootPath)
+                }) { Text("Перенести") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deployHierarchyTarget = null }) { Text("Отмена") }
+            }
+        )
     }
 
     editingTemplateTarget?.let { (oldPath, initialText) ->
@@ -617,6 +663,17 @@ fun SettingsScreen(
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (folders.isNotEmpty()) {
+                            IconButton(
+                                onClick = { deployHierarchyTarget = tpl },
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.CreateNewFolder,
+                                    contentDescription = "Перенести структуру в папки",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                             IconButton(
                                 onClick = { ruleTargetTag = tpl },
                                 modifier = Modifier.size(30.dp)

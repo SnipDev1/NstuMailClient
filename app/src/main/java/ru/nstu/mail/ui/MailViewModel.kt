@@ -54,6 +54,8 @@ import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.collectSubtreeFolderIds
+import ru.nstu.mail.data.deduplicateSummaries
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseFormattedRecipient
@@ -96,6 +98,7 @@ data class MailUiState(
     val folders: List<MailFolder> = emptyList(),
     val currentFolder: MailFolder? = null,
     val filter: MailFilter = MailFilter.ALL,
+    val includeSubfoldersInFolder: Boolean = true,
     val searchQuery: String = "",
     val searchAllFolders: Boolean = false,
     val messages: List<EmailSummary> = emptyList(),
@@ -379,6 +382,90 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         _tagSortRules.value = MailRulesStore.removeTagSortRule(getApplication(), tag)
     }
 
+    fun deployTagHierarchyToFolders(rootTagPath: String) {
+        val c = client ?: return
+        val normRoot = formatTagPath(parseTagPath(rootTagPath))
+        if (normRoot.isEmpty()) return
+
+        val branchPaths = (_tagTemplates.value + normRoot)
+            .map { formatTagPath(parseTagPath(it)) }
+            .filter { it.equals(normRoot, ignoreCase = true) || it.startsWith("$normRoot/", ignoreCase = true) }
+            .distinctBy { it.lowercase() }
+            .sortedWith(compareBy<String>({ parseTagPath(it).size }, { it.lowercase() }))
+        if (branchPaths.isEmpty()) return
+
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                var workingFolders = c.getFolders().toMutableList()
+                var createdCount = 0
+                var boundCount = 0
+
+                for (path in branchPaths) {
+                    val segs = parseTagPath(path)
+                    var parentId: String? = null
+                    var resolvedFolder: MailFolder? = null
+
+                    for (seg in segs) {
+                        var match = workingFolders.firstOrNull { f ->
+                            if (parentId == null) {
+                                !f.isSystem && f.depth == 0 && f.displayName.equals(seg, ignoreCase = true)
+                            } else {
+                                f.parentId == parentId && f.displayName.equals(seg, ignoreCase = true)
+                            }
+                        }
+                        if (match == null) {
+                            c.createFolder(seg, parentFolderId = parentId)
+                            createdCount++
+                            workingFolders = c.getFolders().toMutableList()
+                            match = workingFolders.firstOrNull { f ->
+                                if (parentId == null) {
+                                    !f.isSystem && f.depth == 0 && f.displayName.equals(seg, ignoreCase = true)
+                                } else {
+                                    f.parentId == parentId && f.displayName.equals(seg, ignoreCase = true)
+                                }
+                            }
+                        }
+                        if (match == null) break
+                        parentId = match.id
+                        resolvedFolder = match
+                    }
+
+                    if (resolvedFolder != null) {
+                        val rule = TagSortRule(
+                            tag = path,
+                            targetFolderId = resolvedFolder.id,
+                            targetFolderName = resolvedFolder.displayName,
+                            autoCreateSubfolders = true
+                        )
+                        _tagSortRules.value = MailRulesStore.upsertTagSortRule(app, rule)
+                        boundCount++
+                    }
+                }
+
+                _state.update { st ->
+                    val updatedCurrent = st.currentFolder?.let { cur ->
+                        workingFolders.firstOrNull { it.id == cur.id } ?: cur
+                    }
+                    st.copy(
+                        isLoading = false,
+                        folders = workingFolders,
+                        currentFolder = updatedCurrent,
+                        toastMessage = "Структура «$normRoot» перенесена (создано папок: $createdCount, правил: $boundCount)"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось перенести структуру тегов"
+                    )
+                }
+            }
+        }
+    }
+
     fun setSwipeRightAction(action: SwipeAction) {
         MailRulesStore.setSwipeRightAction(getApplication(), action)
         _swipeRightAction.value = action
@@ -505,6 +592,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             it.copy(
                 currentFolder = folder,
+                includeSubfoldersInFolder = true,
                 searchQuery = "",
                 searchAllFolders = false,
                 selectedIds = emptySet(),
@@ -516,8 +604,22 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setFilter(filter: MailFilter) {
-        if (_state.value.filter == filter) return
-        _state.update { it.copy(filter = filter, selectedIds = emptySet()) }
+        val current = _state.value
+        val restoreAllSubtree = filter == MailFilter.ALL && !current.includeSubfoldersInFolder
+        if (current.filter == filter && !restoreAllSubtree) return
+        _state.update {
+            it.copy(
+                filter = filter,
+                includeSubfoldersInFolder = if (filter == MailFilter.ALL) true else it.includeSubfoldersInFolder,
+                selectedIds = emptySet()
+            )
+        }
+        loadMessages(offset = 0, reset = true)
+    }
+
+    fun setIncludeSubfoldersInFolder(include: Boolean) {
+        if (_state.value.includeSubfoldersInFolder == include) return
+        _state.update { it.copy(includeSubfoldersInFolder = include, selectedIds = emptySet()) }
         loadMessages(offset = 0, reset = true)
     }
 
@@ -545,13 +647,18 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun targetFolderIdsForQuery(): List<String> {
         val st = _state.value
-        return if (st.searchQuery.isNotBlank() && st.searchAllFolders) {
-            st.folders
-                .filter { it.systemKind != SystemFolderKind.DELETED && it.systemKind != SystemFolderKind.JUNK }
-                .map { it.id }
-                .ifEmpty { listOfNotNull(st.currentFolder?.id) }
-        } else {
-            listOfNotNull(st.currentFolder?.id)
+        return when {
+            st.searchQuery.isNotBlank() && st.searchAllFolders -> {
+                st.folders
+                    .filter { it.systemKind != SystemFolderKind.DELETED && it.systemKind != SystemFolderKind.JUNK }
+                    .map { it.id }
+                    .ifEmpty { listOfNotNull(st.currentFolder?.id) }
+            }
+            st.includeSubfoldersInFolder -> {
+                collectSubtreeFolderIds(st.folders, st.currentFolder?.id)
+                    .ifEmpty { listOfNotNull(st.currentFolder?.id) }
+            }
+            else -> listOfNotNull(st.currentFolder?.id)
         }
     }
 
@@ -650,7 +757,13 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     MailNotificationHelper.recordSeenMessages(getApplication(), items)
                 }
                 _state.update { st ->
-                    val merged = if (reset) items else (st.messages + items).distinctBy { it.id }
+                    val merged = if (reset) {
+                        items
+                    } else if (effectiveIds.size > 1) {
+                        deduplicateSummaries(st.messages + items)
+                    } else {
+                        (st.messages + items).distinctBy { it.id }
+                    }
                     st.copy(
                         isLoading = false,
                         isRefreshing = false,

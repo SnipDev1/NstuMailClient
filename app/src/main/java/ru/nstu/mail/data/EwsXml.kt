@@ -366,6 +366,7 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:FieldURI FieldURI="message:InternetMessageId"/>
                   <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
                   <t:ExtendedFieldURI PropertyTag="0x5D02" PropertyType="String"/>
                 </t:AdditionalProperties>
@@ -1129,6 +1130,7 @@ object EwsXml {
             val flagStatus = msg.firstChildElement(EWS_TYPES, "Flag")
                 ?.firstChildText(EWS_TYPES, "FlagStatus").orEmpty()
             val isFlagged = flagStatus.equals("Flagged", ignoreCase = true)
+            val internetMessageId = msg.firstChildText(EWS_TYPES, "InternetMessageId").trim()
 
             val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
                 ?.firstChildElement(EWS_TYPES, "Mailbox")
@@ -1163,11 +1165,12 @@ object EwsXml {
                 hasAttachments = hasAtt,
                 preview = preview,
                 isFlagged = isFlagged,
-                importance = importance
+                importance = importance,
+                internetMessageId = internetMessageId
             )
         }
         val sorted = if (rootFolders.length > 1) {
-            items.sortedByDescending { it.receivedAt }
+            deduplicateSummaries(items)
         } else {
             items
         }
@@ -1483,6 +1486,55 @@ data class FolderMessageKey(
     val dedupKey: String,
     val isRead: Boolean
 )
+
+fun collectSubtreeFolderIds(
+    folders: List<MailFolder>,
+    rootFolderId: String?
+): List<String> {
+    if (rootFolderId.isNullOrBlank()) return emptyList()
+    val childrenByParent = mutableMapOf<String, MutableList<String>>()
+    for (folder in folders) {
+        if (folder.parentId.isNotBlank()) {
+            childrenByParent.getOrPut(folder.parentId) { mutableListOf() }.add(folder.id)
+        }
+    }
+    val result = linkedSetOf<String>()
+    val queue = ArrayDeque<String>()
+    queue.addLast(rootFolderId)
+    while (queue.isNotEmpty()) {
+        val cur = queue.removeFirst()
+        if (!result.add(cur)) continue
+        childrenByParent[cur]?.forEach { childId -> queue.addLast(childId) }
+    }
+    return result.toList()
+}
+
+fun deduplicateSummaries(items: List<EmailSummary>): List<EmailSummary> {
+    if (items.size <= 1) return items
+    val sorted = items.sortedByDescending { it.receivedAt }
+    val groups = LinkedHashMap<String, MutableList<EmailSummary>>()
+    for (item in sorted) {
+        val normMsgId = item.internetMessageId.trim().lowercase()
+        val subj = item.subject.trim().lowercase()
+        val key = when {
+            normMsgId.isNotEmpty() -> "id:$normMsgId"
+            subj.isNotEmpty() || item.receivedAt.isNotBlank() -> "sr:$subj|${item.receivedAt}"
+            else -> "uid:${item.id}"
+        }
+        groups.getOrPut(key) { mutableListOf() }.add(item)
+    }
+    return groups.values.map { group ->
+        if (group.size == 1) {
+            group[0]
+        } else {
+            val base = group.firstOrNull { it.isRead } ?: group.first()
+            base.copy(
+                isRead = group.any { it.isRead },
+                isFlagged = group.any { it.isFlagged }
+            )
+        }
+    }
+}
 
 fun applyUniqueSubtreeCounts(
     folders: List<MailFolder>,

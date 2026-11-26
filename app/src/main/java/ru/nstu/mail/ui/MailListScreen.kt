@@ -136,6 +136,7 @@ fun MailListScreen(
     onRequestAvatar: (String) -> Unit,
     onSelectFolder: (MailFolder) -> Unit,
     onSelectFilter: (MailFilter) -> Unit,
+    onSetIncludeSubfolders: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
     onSearch: (String) -> Unit,
@@ -748,7 +749,18 @@ fun MailListScreen(
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
 
-                // Filter chips + optional "Во всех папках" toggle when searching
+                // Filter chips + child-folder toggle (on parent folders) + "Во всех папках" when searching
+                val hasChildFolders = remember(state.folders, state.currentFolder?.id) {
+                    val curId = state.currentFolder?.id
+                    curId != null && state.folders.any { it.parentId == curId }
+                }
+                val currentFolderTagLabel = remember(state.currentFolder?.id, state.currentFolder?.displayName, tagSortRules) {
+                    val curId = state.currentFolder?.id
+                    tagSortRules.firstOrNull { it.targetFolderId == curId }
+                        ?.pathSegments()
+                        ?.lastOrNull()
+                        ?: state.currentFolder?.displayName.orEmpty()
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -764,11 +776,29 @@ fun MailListScreen(
                         )
                     }
                     MailFilter.entries.forEach { f ->
+                        val isAll = f == MailFilter.ALL
                         FilterChip(
-                            selected = state.filter == f,
-                            onClick = { onSelectFilter(f) },
+                            selected = if (isAll && hasChildFolders) {
+                                state.filter == f && state.includeSubfoldersInFolder
+                            } else {
+                                state.filter == f
+                            },
+                            onClick = {
+                                if (isAll && !state.includeSubfoldersInFolder && state.filter == MailFilter.ALL) {
+                                    onSetIncludeSubfolders(true)
+                                } else {
+                                    onSelectFilter(f)
+                                }
+                            },
                             label = { Text(f.labelRu) }
                         )
+                        if (isAll && hasChildFolders) {
+                            FilterChip(
+                                selected = !state.includeSubfoldersInFolder,
+                                onClick = { onSetIncludeSubfolders(!state.includeSubfoldersInFolder) },
+                                label = { Text("Только с «$currentFolderTagLabel» тегом") }
+                            )
+                        }
                     }
                 }
 

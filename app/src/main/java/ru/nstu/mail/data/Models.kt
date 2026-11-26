@@ -60,7 +60,8 @@ data class EmailSummary(
     val hasAttachments: Boolean,
     val preview: String,
     val isFlagged: Boolean = false,
-    val importance: EmailImportance = EmailImportance.NORMAL
+    val importance: EmailImportance = EmailImportance.NORMAL,
+    val internetMessageId: String = ""
 )
 
 data class AttachmentInfo(

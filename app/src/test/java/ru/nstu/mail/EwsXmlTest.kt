@@ -23,6 +23,8 @@ import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.adjustFolderUnreadDelta
 import ru.nstu.mail.data.applyUniqueSubtreeCounts
 import ru.nstu.mail.data.childTagsForPrefix
+import ru.nstu.mail.data.collectSubtreeFolderIds
+import ru.nstu.mail.data.deduplicateSummaries
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.extractAllTagsForMatching
 import ru.nstu.mail.data.extractSubjectTagHierarchies
@@ -1091,5 +1093,77 @@ class EwsXmlTest {
         // Leaf child keeps own counts => 1/2
         assertEquals(2, merged[2].totalCount)
         assertEquals(1, merged[2].unreadCount)
+    }
+
+    @Test
+    fun `collectSubtreeFolderIds and deduplicateSummaries merge multi-folder child views cleanly`() {
+        val folders = listOf(
+            ru.nstu.mail.data.MailFolder("f-parent", "", "", "Учёба", 1, 0, 1, 0),
+            ru.nstu.mail.data.MailFolder("f-child", "", "f-parent", "ПЗ", 1, 0, 0, 1),
+            ru.nstu.mail.data.MailFolder("f-grand", "", "f-child", "Лаба 1", 1, 0, 0, 2),
+            ru.nstu.mail.data.MailFolder("f-other", "", "", "Важно", 1, 0, 0, 0)
+        )
+        assertEquals(listOf("f-parent", "f-child", "f-grand"), collectSubtreeFolderIds(folders, "f-parent"))
+        assertEquals(listOf("f-other"), collectSubtreeFolderIds(folders, "f-other"))
+
+        val findReq = EwsXml.buildFindItemsRequest(listOf("f-parent", "f-child"), 0, 25)
+        assertTrue(findReq.contains("""FieldURI="message:InternetMessageId""""))
+
+        val multiRespXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="m-parent-copy" ChangeKey="ck1"/>
+                            <t:Subject>Общее ["1", "2"]</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T10:00:00Z</t:DateTimeReceived>
+                            <t:InternetMessageId>&lt;same@nstu.ru&gt;</t:InternetMessageId>
+                            <t:IsRead>false</t:IsRead>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="m-child-copy" ChangeKey="ck2"/>
+                            <t:Subject>Общее ["1", "2"]</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T10:00:00Z</t:DateTimeReceived>
+                            <t:InternetMessageId>&lt;same@nstu.ru&gt;</t:InternetMessageId>
+                            <t:IsRead>true</t:IsRead>
+                          </t:Message>
+                          <t:Message>
+                            <t:ItemId Id="m-leaf-only" ChangeKey="ck3"/>
+                            <t:Subject>Из подпапки</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T12:00:00Z</t:DateTimeReceived>
+                            <t:IsRead>false</t:IsRead>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        val (items, _) = EwsXml.parseFindItemsResponse(multiRespXml)
+        assertEquals(2, items.size)
+        assertEquals("Из подпапки", items[0].subject)
+        assertEquals("Общее [\"1\", \"2\"]", items[1].subject)
+        assertTrue(items[1].isRead)
+
+        // Fallback deduplication without InternetMessageId
+        val a = EmailSummary("id1", "c1", "Тема", "A", "a@nstu.ru", "2026-11-26T09:00:00Z", isRead = false, hasAttachments = false, preview = "")
+        val b = EmailSummary("id2", "c2", "Тема", "A", "a@nstu.ru", "2026-11-26T09:00:00Z", isRead = true, hasAttachments = false, preview = "")
+        val deduped = deduplicateSummaries(listOf(a, b))
+        assertEquals(1, deduped.size)
+        assertTrue(deduped[0].isRead)
     }
 }
