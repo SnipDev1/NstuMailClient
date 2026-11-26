@@ -21,6 +21,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.participants
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.selectNewMessagesToNotify
+import ru.nstu.mail.ui.buildEmailHtmlDocument
 import ru.nstu.mail.ui.extractInitials
 import ru.nstu.mail.ui.finalizeRecipientToken
 import ru.nstu.mail.ui.formatShortPersonName
@@ -652,5 +653,35 @@ class EwsXmlTest {
         assertTrue(closed.connectionClosed)
         assertTrue(closed.subscriptionInvalid)
         assertTrue(closed.newMailItemIds.isEmpty())
+    }
+
+    @Test
+    fun `buildEmailHtmlDocument enforces dark mode contrast after body content`() {
+        val rawBody = """<div style="background-color:#ffffff"><p style="color:#000000 !important">Привет</p></div>"""
+
+        val darkDoc = buildEmailHtmlDocument(
+            contentHtml = rawBody,
+            darkMode = true,
+            bgHex = "#101512",
+            textHex = "#E0E4E0",
+            linkHex = "#5CDAA5"
+        )
+        assertTrue(darkDoc.contains("""content="dark""""))
+        assertFalse(darkDoc.contains("""color:#000000 !important"""))
+        val contentIdx = darkDoc.indexOf("Привет")
+        val overrideIdx = darkDoc.indexOf("color: #E0E4E0 !important")
+        assertTrue(contentIdx in 1 until overrideIdx)
+        assertTrue(darkDoc.contains("background-color: transparent !important"))
+
+        val lightDoc = buildEmailHtmlDocument(
+            contentHtml = rawBody,
+            darkMode = false,
+            bgHex = "#FFFFFF",
+            textHex = "#1B1B1B",
+            linkHex = "#006B47"
+        )
+        assertTrue(lightDoc.contains("""content="light""""))
+        assertTrue(lightDoc.contains(rawBody))
+        assertFalse(lightDoc.contains("background-color: transparent !important"))
     }
 }
