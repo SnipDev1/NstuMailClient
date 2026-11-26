@@ -5,13 +5,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color as AndroidColor
-import android.os.Build
-import android.text.Html
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -87,6 +87,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import ru.nstu.mail.data.AttachmentInfo
 import ru.nstu.mail.data.EmailDetail
+import ru.nstu.mail.data.EmailHtmlSanitizer
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EmailParticipant
 import ru.nstu.mail.data.MailFolder
@@ -94,6 +95,7 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.participants
+import java.io.ByteArrayInputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -457,13 +459,36 @@ private fun SandboxedEmailWebView(
                     mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     builtInZoomControls = true
                     displayZoomControls = false
-                    loadWithOverviewMode = true
+                    loadWithOverviewMode = false
                     useWideViewPort = true
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        isAlgorithmicDarkeningAllowed = false
+                    textZoom = 100
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+                        WebSettingsCompat.setSafeBrowsingEnabled(this, true)
+                    }
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                        WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, false)
                     }
                 }
                 webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): WebResourceResponse? {
+                        val scheme = request?.url?.scheme?.lowercase().orEmpty()
+                        return if (scheme == "https" || scheme == "data") {
+                            null
+                        } else {
+                            WebResourceResponse(
+                                "text/plain",
+                                "utf-8",
+                                403,
+                                "Forbidden",
+                                emptyMap(),
+                                ByteArrayInputStream(ByteArray(0))
+                            )
+                        }
+                    }
+
                     override fun shouldOverrideUrlLoading(
                         view: WebView?,
                         request: WebResourceRequest?
@@ -481,8 +506,8 @@ private fun SandboxedEmailWebView(
         },
         update = { webView ->
             webView.setBackgroundColor(backgroundColorInt)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                webView.settings.isAlgorithmicDarkeningAllowed = false
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, false)
             }
             if (webView.tag != html) {
                 webView.tag = html
@@ -499,63 +524,14 @@ internal fun wrapEmailBody(
     bgHex: String,
     textHex: String,
     linkHex: String
-): String {
-    val content = if (isHtml) {
-        body
-    } else {
-        "<pre style=\"white-space:pre-wrap;font-family:sans-serif;font-size:15px;\">" +
-            Html.escapeHtml(body) +
-            "</pre>"
-    }
-    return buildEmailHtmlDocument(content, darkMode, bgHex, textHex, linkHex)
-}
-
-internal fun buildEmailHtmlDocument(
-    contentHtml: String,
-    darkMode: Boolean,
-    bgHex: String,
-    textHex: String,
-    linkHex: String
-): String {
-    if (!darkMode) {
-        return """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<meta name="color-scheme" content="light"/>
-<style>
-body { margin: 16px; color: $textHex; background: $bgHex; font-family: sans-serif; line-height: 1.45; word-wrap: break-word; }
-a { color: $linkHex; }
-img { max-width: 100%; height: auto; }
-table { max-width: 100%; }
-</style>
-</head>
-<body>$contentHtml</body>
-</html>"""
-    }
-
-    val normalizedContent = contentHtml.replace(Regex("!\\s*important", RegexOption.IGNORE_CASE), "")
-    return """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<meta name="color-scheme" content="dark"/>
-</head>
-<body>$normalizedContent
-<style>
-html, body { margin: 16px !important; color: $textHex !important; background: $bgHex !important; background-color: $bgHex !important; font-family: sans-serif; line-height: 1.45; word-wrap: break-word; }
-body *, div, p, span, td, th, li, ul, ol, blockquote, pre, code, h1, h2, h3, h4, h5, h6, font, strong, b, em, i, small, label, section, article, header, footer, table, tbody, thead, tr { color: $textHex !important; background-color: transparent !important; }
-a, a * { color: $linkHex !important; }
-blockquote { border-left: 3px solid $linkHex !important; padding-left: 10px !important; margin-left: 4px !important; }
-hr { border-color: rgba(255, 255, 255, 0.2) !important; }
-img { max-width: 100%; height: auto; }
-table { max-width: 100%; }
-</style>
-</body>
-</html>"""
-}
+): String = EmailHtmlSanitizer.renderEmailDocument(
+    body = body,
+    isHtml = isHtml,
+    darkMode = darkMode,
+    bgHex = bgHex,
+    textHex = textHex,
+    linkHex = linkHex
+)
 
 private fun formatBytes(bytes: Long): String = when {
     bytes <= 0L -> "0 Б"

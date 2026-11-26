@@ -37,6 +37,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +48,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import ru.nstu.mail.BuildConfig
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.notify.MailNotificationHelper
@@ -78,8 +82,23 @@ fun SettingsScreen(
     BackHandler(onBack = onBack)
 
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val snackbarHostState = remember { SnackbarHostState() }
     var hasSystemPerm by remember { mutableStateOf(MailNotificationHelper.hasSystemPermission(context)) }
+    var ignoringBatteryOpt by remember {
+        mutableStateOf(MailNotificationHelper.isIgnoringBatteryOptimizations(context))
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasSystemPerm = MailNotificationHelper.hasSystemPermission(context)
+                ignoringBatteryOpt = MailNotificationHelper.isIgnoringBatteryOptimizations(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val permLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -273,6 +292,23 @@ fun SettingsScreen(
                     Spacer(Modifier.height(10.dp))
                     OutlinedButton(onClick = onCheckNewMailNow) {
                         Text("Проверить сейчас")
+                    }
+                }
+
+                if (!ignoringBatteryOpt) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Оптимизация батареи включена — система может останавливать уведомления при выгрузке из памяти.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        runCatching {
+                            context.startActivity(MailNotificationHelper.batteryOptimizationSettingsIntent())
+                        }
+                    }) {
+                        Text("Отключить оптимизацию батареи")
                     }
                 }
             }

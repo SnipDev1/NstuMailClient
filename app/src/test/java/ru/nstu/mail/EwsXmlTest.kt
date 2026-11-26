@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import ru.nstu.mail.data.EmailDetail
+import ru.nstu.mail.data.EmailHtmlSanitizer
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.EwsClient
@@ -21,7 +22,6 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.participants
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.selectNewMessagesToNotify
-import ru.nstu.mail.ui.buildEmailHtmlDocument
 import ru.nstu.mail.ui.extractInitials
 import ru.nstu.mail.ui.finalizeRecipientToken
 import ru.nstu.mail.ui.formatShortPersonName
@@ -656,32 +656,64 @@ class EwsXmlTest {
     }
 
     @Test
-    fun `buildEmailHtmlDocument enforces dark mode contrast after body content`() {
-        val rawBody = """<div style="background-color:#ffffff"><p style="color:#000000 !important">Привет</p></div>"""
+    fun `EmailHtmlSanitizer strips unsafe tags or attrs and adapts colors safely`() {
+        val evilHtml = """
+            <div style="background-color:#ffffff; background:url(javascript:alert(1)); position:fixed">
+              <script>alert('xss')</script>
+              <iframe src="https://evil.example"></iframe>
+              <form action="/steal"><input type="text"/></form>
+              <p onclick="evil()" style="color:#000000 !important; font-weight:bold">Привет</p>
+              <span style="color:#4CAF50">Акцент</span>
+              <table><tr><td colspan="2" bgcolor="#ffffff"><a href="https://nstu.ru">Сайт</a></td></tr></table>
+              <a href="javascript:alert(1)">Плохая ссылка</a>
+              <img src="data:image/png;base64,iVBORw0KGgo=" alt="ok"/>
+              <img src="data:image/svg+xml;base64,PHN2Zy8+" alt="bad"/>
+            </div>
+        """.trimIndent()
 
-        val darkDoc = buildEmailHtmlDocument(
-            contentHtml = rawBody,
+        val darkDoc = EmailHtmlSanitizer.renderEmailDocument(
+            body = evilHtml,
+            isHtml = true,
             darkMode = true,
             bgHex = "#101512",
             textHex = "#E0E4E0",
             linkHex = "#5CDAA5"
         )
-        assertTrue(darkDoc.contains("""content="dark""""))
-        assertFalse(darkDoc.contains("""color:#000000 !important"""))
-        val contentIdx = darkDoc.indexOf("Привет")
-        val overrideIdx = darkDoc.indexOf("color: #E0E4E0 !important")
-        assertTrue(contentIdx in 1 until overrideIdx)
-        assertTrue(darkDoc.contains("background-color: transparent !important"))
+        assertFalse(darkDoc.contains("<script", ignoreCase = true))
+        assertFalse(darkDoc.contains("<iframe", ignoreCase = true))
+        assertFalse(darkDoc.contains("<form", ignoreCase = true))
+        assertFalse(darkDoc.contains("onclick", ignoreCase = true))
+        assertFalse(darkDoc.contains("javascript:", ignoreCase = true))
+        assertFalse(darkDoc.contains("data:image/svg+xml", ignoreCase = true))
+        assertFalse(darkDoc.contains("position:fixed", ignoreCase = true))
+        assertFalse(darkDoc.contains("#000000", ignoreCase = true))
+        assertFalse(darkDoc.contains("bgcolor", ignoreCase = true))
+        assertTrue(darkDoc.contains("font-weight: bold"))
+        assertTrue(darkDoc.contains("#4CAF50"))
+        assertTrue(darkDoc.contains("<table>"))
+        assertTrue(darkDoc.contains("""href="https://nstu.ru""""))
+        assertTrue(darkDoc.contains("data:image/png;base64,iVBORw0KGgo="))
 
-        val lightDoc = buildEmailHtmlDocument(
-            contentHtml = rawBody,
+        val lightDoc = EmailHtmlSanitizer.renderEmailDocument(
+            body = evilHtml,
+            isHtml = true,
             darkMode = false,
             bgHex = "#FFFFFF",
             textHex = "#1B1B1B",
             linkHex = "#006B47"
         )
-        assertTrue(lightDoc.contains("""content="light""""))
-        assertTrue(lightDoc.contains(rawBody))
-        assertFalse(lightDoc.contains("background-color: transparent !important"))
+        assertTrue(lightDoc.contains("#000000"))
+        assertTrue(lightDoc.contains("""bgcolor="#ffffff""""))
+        assertFalse(lightDoc.contains("<script", ignoreCase = true))
+
+        val plainDoc = EmailHtmlSanitizer.renderEmailDocument(
+            body = "<b>Привет</b> & 1 < 2",
+            isHtml = false,
+            darkMode = true,
+            bgHex = "#101512",
+            textHex = "#E0E4E0",
+            linkHex = "#5CDAA5"
+        )
+        assertTrue(plainDoc.contains("&lt;b&gt;Привет&lt;/b&gt;"))
     }
 }

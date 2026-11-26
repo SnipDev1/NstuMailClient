@@ -33,13 +33,16 @@
         <service
             android:name=".notify.MailPushService"
             android:exported="false"
-            android:foregroundServiceType="remoteMessaging" />
+            android:foregroundServiceType="remoteMessaging"
+            android:stopWithTask="false" />
 
         <receiver
             android:name=".notify.MailBootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="ru.nstu.mail.ACTION_RESTART_PUSH" />
             </intent-filter>
         </receiver>
 

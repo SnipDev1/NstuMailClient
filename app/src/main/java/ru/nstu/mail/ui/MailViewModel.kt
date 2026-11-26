@@ -851,7 +851,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     it.contentType.startsWith("image/", ignoreCase = true) &&
                     it.size in 1..MAX_INLINE_IMAGE_BYTES
             }
-            .take(5)
+            .take(15)
 
         for (att in inlineImages) {
             runCatching {
@@ -860,6 +860,10 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 val dataUri = "data:${downloaded.contentType};base64,$b64"
                 val cidClean = att.contentId.trim().removePrefix("<").removeSuffix(">")
                 html = html.replace("cid:$cidClean", dataUri, ignoreCase = true)
+                val cidEncoded = Uri.encode(cidClean)
+                if (cidEncoded != cidClean) {
+                    html = html.replace("cid:$cidEncoded", dataUri, ignoreCase = true)
+                }
             }
         }
         return detail.copy(body = html)
@@ -1539,7 +1543,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val PAGE_SIZE = 25
-        private const val MAX_INLINE_IMAGE_BYTES = 512 * 1024L
+        private const val MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024L
         private const val MAX_SINGLE_UPLOAD_BYTES = 20 * 1024 * 1024L
         private const val MAX_TOTAL_UPLOAD_BYTES = 25 * 1024 * 1024L
         private val RU_LOCALE = Locale("ru")

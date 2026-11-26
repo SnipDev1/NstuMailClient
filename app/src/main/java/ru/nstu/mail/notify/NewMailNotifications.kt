@@ -2,6 +2,7 @@ package ru.nstu.mail.notify
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -14,6 +15,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -46,6 +49,7 @@ import ru.nstu.mail.data.EwsException
 import java.util.concurrent.TimeUnit
 
 const val EXTRA_MESSAGE_ID = "extra_message_id"
+const val ACTION_RESTART_PUSH = "ru.nstu.mail.ACTION_RESTART_PUSH"
 const val NOTIFICATION_CHANNEL_ID = "new_mail"
 const val PUSH_SERVICE_CHANNEL_ID = "push_service"
 val NOTIFICATION_INTERVALS_MINUTES = listOf(15, 30, 60)
@@ -94,10 +98,12 @@ object MailNotificationHelper {
 
     private const val PERIODIC_WORK_NAME = "nstumail_new_mail_poll"
     private const val IMMEDIATE_WORK_NAME = "nstumail_new_mail_now"
+    private const val RECOVERY_WORK_NAME = "nstumail_new_mail_recover"
     private const val NOTIFICATION_ID = 1001
     internal const val PUSH_SERVICE_NOTIFICATION_ID = 1002
     private const val REQUEST_CODE_OPEN = 1001
     private const val REQUEST_CODE_PUSH_SETTINGS = 1002
+    private const val REQUEST_CODE_RESTART_ALARM = 1003
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -143,6 +149,14 @@ object MailNotificationHelper {
             ) == PackageManager.PERMISSION_GRANTED
         }
     }
+
+    fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+        val pm = context.getSystemService(PowerManager::class.java) ?: return true
+        return pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    fun batteryOptimizationSettingsIntent(): Intent =
+        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -250,10 +264,11 @@ object MailNotificationHelper {
         }
         when (getMode(app)) {
             NotificationMode.PUSH -> {
-                cancelPeriodicCheck(app)
                 runCatching {
                     ContextCompat.startForegroundService(app, Intent(app, MailPushService::class.java))
                 }
+                // Keep WorkManager watchdog active so swiping from Recents/OEM kills recover automatically.
+                schedulePeriodicCheck(app, replaceExisting = replacePeriodic)
             }
             NotificationMode.PERIODIC -> {
                 stopPushService(app)
@@ -273,7 +288,11 @@ object MailNotificationHelper {
             cancelPeriodicCheck(context)
             return
         }
-        val interval = getIntervalMinutes(context).toLong()
+        val interval = if (getMode(context) == NotificationMode.PUSH) {
+            15L
+        } else {
+            getIntervalMinutes(context).toLong()
+        }
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -284,6 +303,40 @@ object MailNotificationHelper {
             PERIODIC_WORK_NAME,
             if (replaceExisting) ExistingPeriodicWorkPolicy.UPDATE else ExistingPeriodicWorkPolicy.KEEP,
             request
+        )
+    }
+
+    fun scheduleDelayedRecovery(context: Context) {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+        val request = OneTimeWorkRequestBuilder<NewMailWorker>()
+            .setInitialDelay(5, TimeUnit.SECONDS)
+            .setConstraints(constraints)
+            .build()
+        WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+            RECOVERY_WORK_NAME,
+            ExistingWorkPolicy.REPLACE,
+            request
+        )
+    }
+
+    fun schedulePushRestartAlarm(context: Context, delayMs: Long = 2_500L) {
+        val app = context.applicationContext
+        val am = app.getSystemService(AlarmManager::class.java) ?: return
+        val restartIntent = Intent(app, MailBootReceiver::class.java).apply {
+            action = ACTION_RESTART_PUSH
+        }
+        val pi = PendingIntent.getBroadcast(
+            app,
+            REQUEST_CODE_RESTART_ALARM,
+            restartIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        am.setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + delayMs,
+            pi
         )
     }
 
@@ -305,6 +358,7 @@ object MailNotificationHelper {
         val wm = WorkManager.getInstance(context.applicationContext)
         wm.cancelUniqueWork(PERIODIC_WORK_NAME)
         wm.cancelUniqueWork(IMMEDIATE_WORK_NAME)
+        wm.cancelUniqueWork(RECOVERY_WORK_NAME)
     }
 
     fun cancelNotifications(context: Context) {
@@ -405,6 +459,19 @@ class NewMailWorker(
         val creds = runCatching { CredentialStore(applicationContext).load() }.getOrNull()
             ?: return Result.success()
 
+        val mode = MailNotificationHelper.getMode(applicationContext)
+        if (mode == NotificationMode.PUSH) {
+            if (MailPushService.isRunning) {
+                return Result.success()
+            }
+            runCatching {
+                ContextCompat.startForegroundService(
+                    applicationContext,
+                    Intent(applicationContext, MailPushService::class.java)
+                )
+            }
+        }
+
         return try {
             MailNotificationHelper.fetchUnreadAndNotify(applicationContext, EwsClient(creds))
             Result.success()
@@ -441,16 +508,30 @@ class MailPushService : Service() {
             !MailNotificationHelper.hasSystemPermission(applicationContext) ||
             creds == null
         ) {
+            isRunning = false
             stopSelf()
             return START_NOT_STICKY
         }
 
+        isRunning = true
         if (streamJob?.isActive != true) {
             streamJob = serviceScope.launch {
                 runStreamingLoop()
             }
         }
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (MailNotificationHelper.isEnabled(applicationContext) &&
+            MailNotificationHelper.getMode(applicationContext) == NotificationMode.PUSH &&
+            MailNotificationHelper.hasSystemPermission(applicationContext)
+        ) {
+            MailNotificationHelper.schedulePushRestartAlarm(applicationContext)
+            MailNotificationHelper.schedulePeriodicCheck(applicationContext, replaceExisting = false)
+            MailNotificationHelper.scheduleDelayedRecovery(applicationContext)
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     private suspend fun runStreamingLoop() {
@@ -460,11 +541,13 @@ class MailPushService : Service() {
                 MailNotificationHelper.getMode(applicationContext) != NotificationMode.PUSH ||
                 !MailNotificationHelper.hasSystemPermission(applicationContext)
             ) {
+                isRunning = false
                 stopSelf()
                 return
             }
             val creds = runCatching { CredentialStore(applicationContext).load() }.getOrNull()
             if (creds == null) {
+                isRunning = false
                 stopSelf()
                 return
             }
@@ -494,6 +577,7 @@ class MailPushService : Service() {
                 throw e
             } catch (e: EwsException) {
                 if (e.isAuthError) {
+                    isRunning = false
                     stopSelf()
                     return
                 }
@@ -511,16 +595,26 @@ class MailPushService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         serviceScope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        @Volatile
+        var isRunning: Boolean = false
+    }
 }
 
 class MailBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action == Intent.ACTION_BOOT_COMPLETED) {
+        val action = intent?.action ?: return
+        if (action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_MY_PACKAGE_REPLACED ||
+            action == ACTION_RESTART_PUSH
+        ) {
             MailNotificationHelper.syncBackgroundDelivery(context)
         }
     }
