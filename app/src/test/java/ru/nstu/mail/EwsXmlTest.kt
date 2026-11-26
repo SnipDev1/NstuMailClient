@@ -3,6 +3,7 @@ package ru.nstu.mail
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -17,7 +18,9 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.participants
 import ru.nstu.mail.ui.extractInitials
+import ru.nstu.mail.ui.finalizeRecipientToken
 import ru.nstu.mail.ui.formatShortPersonName
+import ru.nstu.mail.ui.parseRecipientTokens
 import java.util.Base64
 
 class EwsXmlTest {
@@ -463,5 +466,21 @@ class EwsXmlTest {
         assertEquals("1-305", profiles[0].officeLocation)
         assertEquals(listOf("nav@smc.nstu.ru"), profiles[0].aliases)
         assertEquals(listOf("Рабочий" to "+7-383-346-00-00"), profiles[0].phones)
+    }
+
+    @Test
+    fun `parseRecipientTokens and finalizeRecipientToken split commas semicolons and keep search spaces`() {
+        val (noneDone, searching) = parseRecipientTokens("Никулин Евгений")
+        assertTrue(noneDone.isEmpty())
+        assertEquals("Никулин Евгений", searching)
+
+        val (done, rem) = parseRecipientTokens("a@nstu.ru, Никулин А.В. <b@corp.nstu.ru>; Петров")
+        assertEquals(2, done.size)
+        assertEquals("a@nstu.ru" to "a@nstu.ru", done[0])
+        assertEquals("Никулин А.В." to "b@corp.nstu.ru", done[1])
+        assertEquals("Петров", rem)
+
+        assertEquals("Иван" to "ivan@nstu.ru", finalizeRecipientToken("Иван <ivan@nstu.ru>,"))
+        assertNull(finalizeRecipientToken("без_собаки"))
     }
 }

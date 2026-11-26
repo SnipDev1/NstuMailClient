@@ -126,12 +126,14 @@ class MainActivity : ComponentActivity() {
                         draft = screen.draft,
                         directorySuggestions = state.directorySuggestions,
                         avatars = avatars,
+                        personProfiles = personProfiles,
                         isSending = state.isSending,
                         errorMessage = state.errorMessage,
                         onBack = vm::backToMailList,
                         onSearchDirectory = vm::searchDirectory,
                         onClearSuggestions = vm::clearDirectorySuggestions,
                         onRequestAvatar = vm::requestAvatar,
+                        onRequestPersonProfile = vm::requestPersonProfile,
                         onSubmit = vm::saveOrSendEmail
                     )
 

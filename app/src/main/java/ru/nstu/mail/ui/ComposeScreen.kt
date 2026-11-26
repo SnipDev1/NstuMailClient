@@ -7,10 +7,14 @@ import android.text.Html
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,7 +22,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -39,10 +49,12 @@ import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,15 +62,55 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.nstu.mail.data.ContactEntry
 import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
+import ru.nstu.mail.data.ParticipantRole
+import ru.nstu.mail.data.PersonProfile
+import ru.nstu.mail.data.parseFormattedRecipient
+import java.util.concurrent.atomic.AtomicLong
 
 private enum class ActiveRecipientField { TO, CC, BCC }
+
+data class ComposeRecipient(
+    val id: Long,
+    val name: String,
+    val email: String
+)
+
+fun parseRecipientTokens(raw: String): Pair<List<Pair<String, String>>, String> {
+    if (',' !in raw && ';' !in raw) {
+        return emptyList<Pair<String, String>>() to raw
+    }
+    val parts = raw.split(',', ';')
+    val completed = parts.dropLast(1).mapNotNull { seg ->
+        finalizeRecipientToken(seg)
+    }
+    return completed to parts.last().trimStart()
+}
+
+fun finalizeRecipientToken(raw: String): Pair<String, String>? {
+    val cleaned = raw.trim().trimEnd(',', ';').trim()
+    if (cleaned.isEmpty()) return null
+    val (name, email) = parseFormattedRecipient(cleaned)
+    return if ('@' in email) {
+        name.ifBlank { email } to email
+    } else {
+        null
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -70,12 +122,14 @@ fun ComposeScreen(
     draft: EmailDetail?,
     directorySuggestions: List<ContactEntry>,
     avatars: Map<String, ImageBitmap?>,
+    personProfiles: Map<String, PersonProfile?>,
     isSending: Boolean,
     errorMessage: String?,
     onBack: () -> Unit,
     onSearchDirectory: (String) -> Unit,
     onClearSuggestions: () -> Unit,
     onRequestAvatar: (String) -> Unit,
+    onRequestPersonProfile: (name: String, email: String) -> Unit,
     onSubmit: (
         draftId: String?,
         draftChangeKey: String?,
@@ -93,41 +147,76 @@ fun ComposeScreen(
     BackHandler(enabled = !isSending, onBack = onBack)
 
     val context = LocalContext.current
+    val idSeq = remember { AtomicLong(1L) }
 
-    var to by rememberSaveable {
-        mutableStateOf(
+    fun makeRecipient(name: String, email: String) =
+        ComposeRecipient(id = idSeq.getAndIncrement(), name = name, email = email)
+
+    var toRecipients by remember {
+        mutableStateOf<List<ComposeRecipient>>(
             when {
-                draft != null -> draft.to.joinToString(", ") { MailViewModel.extractRawEmail(it) }
-                replyTo != null && !isForward && replyAll -> {
-                    val others = (listOf(replyTo.fromEmail) + replyTo.to.map { MailViewModel.extractRawEmail(it) })
-                        .filter { it.isNotBlank() && !it.equals(currentUserEmail, ignoreCase = true) }
-                        .distinctBy { it.lowercase() }
-                    others.joinToString(", ")
+                draft != null -> draft.to.mapNotNull { raw ->
+                    val (n, e) = parseFormattedRecipient(raw)
+                    if (e.isNotBlank()) makeRecipient(n, e) else null
                 }
-                replyTo != null && !isForward -> replyTo.fromEmail
-                else -> ""
+                replyTo != null && !isForward && replyAll -> {
+                    val rawPairs = buildList {
+                        if (replyTo.fromEmail.isNotBlank()) {
+                            add(replyTo.from to replyTo.fromEmail)
+                        }
+                        replyTo.to.forEach { add(parseFormattedRecipient(it)) }
+                    }
+                    rawPairs
+                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
+                        .distinctBy { it.second.lowercase() }
+                        .map { (n, e) -> makeRecipient(n, e) }
+                }
+                replyTo != null && !isForward && replyTo.fromEmail.isNotBlank() ->
+                    listOf(makeRecipient(replyTo.from, replyTo.fromEmail))
+                else -> emptyList()
             }
         )
     }
-    var cc by rememberSaveable {
-        mutableStateOf(
+
+    var ccRecipients by remember {
+        mutableStateOf<List<ComposeRecipient>>(
             when {
-                draft != null -> draft.cc.joinToString(", ") { MailViewModel.extractRawEmail(it) }
+                draft != null -> draft.cc.mapNotNull { raw ->
+                    val (n, e) = parseFormattedRecipient(raw)
+                    if (e.isNotBlank()) makeRecipient(n, e) else null
+                }
                 replyTo != null && replyAll && !isForward ->
                     replyTo.cc
-                        .map { MailViewModel.extractRawEmail(it) }
-                        .filter { it.isNotBlank() && !it.equals(currentUserEmail, ignoreCase = true) }
-                        .joinToString(", ")
-                else -> ""
+                        .map { parseFormattedRecipient(it) }
+                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
+                        .distinctBy { it.second.lowercase() }
+                        .map { (n, e) -> makeRecipient(n, e) }
+                else -> emptyList()
             }
         )
     }
-    var bcc by rememberSaveable {
-        mutableStateOf(
-            draft?.bcc?.joinToString(", ") { MailViewModel.extractRawEmail(it) }.orEmpty()
+
+    var bccRecipients by remember {
+        mutableStateOf<List<ComposeRecipient>>(
+            draft?.bcc.orEmpty().mapNotNull { raw ->
+                val (n, e) = parseFormattedRecipient(raw)
+                if (e.isNotBlank()) makeRecipient(n, e) else null
+            }
         )
     }
-    var showBcc by rememberSaveable { mutableStateOf(bcc.isNotBlank()) }
+
+    var showCc by rememberSaveable { mutableStateOf(ccRecipients.isNotEmpty()) }
+    var showBcc by rememberSaveable { mutableStateOf(bccRecipients.isNotEmpty()) }
+
+    var toInput by rememberSaveable { mutableStateOf("") }
+    var ccInput by rememberSaveable { mutableStateOf("") }
+    var bccInput by rememberSaveable { mutableStateOf("") }
+
+    var activeField by remember { mutableStateOf(ActiveRecipientField.TO) }
+    var editingField by remember { mutableStateOf<ActiveRecipientField?>(null) }
+    var editingId by remember { mutableStateOf<Long?>(null) }
+    var editingText by remember { mutableStateOf("") }
+
     var subject by rememberSaveable {
         mutableStateOf(
             when {
@@ -171,7 +260,6 @@ fun ComposeScreen(
         mutableStateOf(draft?.importance ?: EmailImportance.NORMAL)
     }
     var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var activeField by remember { mutableStateOf(ActiveRecipientField.TO) }
 
     val attachLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -181,9 +269,119 @@ fun ComposeScreen(
         }
     }
 
-    fun appendRecipient(current: String, email: String): String {
-        val prefix = if (',' in current) current.substringBeforeLast(',') + ", " else ""
-        return "$prefix$email, "
+    fun listFor(field: ActiveRecipientField): List<ComposeRecipient> = when (field) {
+        ActiveRecipientField.TO -> toRecipients
+        ActiveRecipientField.CC -> ccRecipients
+        ActiveRecipientField.BCC -> bccRecipients
+    }
+
+    fun updateList(field: ActiveRecipientField, next: List<ComposeRecipient>) {
+        when (field) {
+            ActiveRecipientField.TO -> toRecipients = next
+            ActiveRecipientField.CC -> ccRecipients = next
+            ActiveRecipientField.BCC -> bccRecipients = next
+        }
+    }
+
+    fun inputFor(field: ActiveRecipientField): String = when (field) {
+        ActiveRecipientField.TO -> toInput
+        ActiveRecipientField.CC -> ccInput
+        ActiveRecipientField.BCC -> bccInput
+    }
+
+    fun setInput(field: ActiveRecipientField, value: String) {
+        when (field) {
+            ActiveRecipientField.TO -> toInput = value
+            ActiveRecipientField.CC -> ccInput = value
+            ActiveRecipientField.BCC -> bccInput = value
+        }
+    }
+
+    fun addUniqueRecipients(field: ActiveRecipientField, pairs: List<Pair<String, String>>) {
+        if (pairs.isEmpty()) return
+        val current = listFor(field).toMutableList()
+        for ((name, email) in pairs) {
+            if (current.none { it.email.equals(email, ignoreCase = true) }) {
+                current += makeRecipient(name, email)
+            }
+        }
+        updateList(field, current)
+    }
+
+    fun commitTrailingInput(field: ActiveRecipientField) {
+        val raw = inputFor(field)
+        val parsed = finalizeRecipientToken(raw)
+        if (parsed != null) {
+            addUniqueRecipients(field, listOf(parsed))
+            setInput(field, "")
+            onClearSuggestions()
+        }
+    }
+
+    fun commitInlineEdit() {
+        val f = editingField ?: return
+        val id = editingId ?: return
+        val current = listFor(f)
+        val existing = current.firstOrNull { it.id == id }
+        val trimmed = editingText.trim().trimEnd(',', ';').trim()
+        if (trimmed.isEmpty()) {
+            updateList(f, current.filterNot { it.id == id })
+        } else {
+            val parsed = finalizeRecipientToken(trimmed)
+            if (parsed != null && existing != null) {
+                val (newName, newEmail) = parsed
+                val finalName = if (newEmail.equals(existing.email, ignoreCase = true) &&
+                    existing.name.isNotBlank() && !existing.name.equals(existing.email, true)
+                ) {
+                    existing.name
+                } else {
+                    newName
+                }
+                updateList(
+                    f,
+                    current.map {
+                        if (it.id == id) it.copy(name = finalName, email = newEmail) else it
+                    }
+                )
+            }
+        }
+        editingField = null
+        editingId = null
+        editingText = ""
+        onClearSuggestions()
+    }
+
+    fun collectAddressesForSubmit(field: ActiveRecipientField): String {
+        val emails = listFor(field).map { it.email }.toMutableList()
+        val trailing = inputFor(field).trim()
+        if (trailing.isNotEmpty()) {
+            val parsed = finalizeRecipientToken(trailing)
+            if (parsed != null) {
+                if (emails.none { it.equals(parsed.second, ignoreCase = true) }) {
+                    emails += parsed.second
+                }
+            } else {
+                emails += trailing
+            }
+        }
+        return emails.joinToString(", ")
+    }
+
+    fun submitEmail(send: Boolean) {
+        commitInlineEdit()
+        onSubmit(
+            draft?.id,
+            draft?.changeKey,
+            collectAddressesForSubmit(ActiveRecipientField.TO),
+            collectAddressesForSubmit(ActiveRecipientField.CC),
+            collectAddressesForSubmit(ActiveRecipientField.BCC),
+            subject,
+            body,
+            importance,
+            selectedUris,
+            context,
+            send
+        )
     }
 
     Scaffold(
@@ -213,25 +411,13 @@ fun ComposeScreen(
                         Icon(Icons.Default.AttachFile, contentDescription = "Прикрепить файл")
                     }
                     IconButton(
-                        onClick = {
-                            onSubmit(
-                                draft?.id,
-                                draft?.changeKey,
-                                to, cc, bcc, subject, body, importance, selectedUris, context, false
-                            )
-                        },
+                        onClick = { submitEmail(send = false) },
                         enabled = !isSending
                     ) {
                         Icon(Icons.Default.Save, contentDescription = "Сохранить черновик")
                     }
                     IconButton(
-                        onClick = {
-                            onSubmit(
-                                draft?.id,
-                                draft?.changeKey,
-                                to, cc, bcc, subject, body, importance, selectedUris, context, true
-                            )
-                        },
+                        onClick = { submitEmail(send = true) },
                         enabled = !isSending
                     ) {
                         if (isSending) {
@@ -251,7 +437,7 @@ fun ComposeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp)
                 .verticalScroll(rememberScrollState())
         ) {
             if (!errorMessage.isNullOrBlank()) {
@@ -271,108 +457,116 @@ fun ComposeScreen(
                 }
             }
 
-            OutlinedTextField(
-                value = to,
-                onValueChange = {
-                    to = it
-                    activeField = ActiveRecipientField.TO
-                    onSearchDirectory(it)
-                },
-                label = { Text("Кому (через запятую)") },
-                singleLine = true,
-                enabled = !isSending,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            @Composable
+            fun renderSection(
+                field: ActiveRecipientField,
+                role: ParticipantRole,
+                trailingHeaderActions: @Composable () -> Unit = {}
             ) {
-                OutlinedTextField(
-                    value = cc,
-                    onValueChange = {
-                        cc = it
-                        activeField = ActiveRecipientField.CC
-                        onSearchDirectory(it)
-                    },
-                    label = { Text("Копия (необязательно)") },
-                    singleLine = true,
+                RecipientStripSection(
+                    role = role,
+                    recipients = listFor(field),
+                    inputText = inputFor(field),
+                    editingId = if (editingField == field) editingId else null,
+                    editingText = editingText,
+                    avatars = avatars,
+                    personProfiles = personProfiles,
                     enabled = !isSending,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    modifier = Modifier.weight(1f)
+                    suggestions = if (activeField == field) directorySuggestions else emptyList(),
+                    headerExtra = trailingHeaderActions,
+                    onRequestAvatar = onRequestAvatar,
+                    onRequestPersonProfile = onRequestPersonProfile,
+                    onInputChange = { newVal ->
+                        activeField = field
+                        val (completed, remainder) = parseRecipientTokens(newVal)
+                        if (completed.isNotEmpty()) {
+                            addUniqueRecipients(field, completed)
+                        }
+                        setInput(field, remainder)
+                        onSearchDirectory(remainder)
+                    },
+                    onInputFocusChanged = { focused ->
+                        if (focused) {
+                            activeField = field
+                        } else {
+                            commitTrailingInput(field)
+                        }
+                    },
+                    onInputDone = { commitTrailingInput(field) },
+                    onStartEdit = { rec ->
+                        commitInlineEdit()
+                        activeField = field
+                        editingField = field
+                        editingId = rec.id
+                        editingText = rec.email
+                    },
+                    onEditTextChange = { newText ->
+                        activeField = field
+                        if (',' in newText || ';' in newText) {
+                            val clean = newText.replace(",", "").replace(";", "").trim()
+                            editingText = clean
+                            commitInlineEdit()
+                        } else {
+                            editingText = newText
+                            onSearchDirectory(newText)
+                        }
+                    },
+                    onCommitEdit = { commitInlineEdit() },
+                    onRemove = { rec ->
+                        updateList(field, listFor(field).filterNot { it.id == rec.id })
+                        if (editingField == field && editingId == rec.id) {
+                            editingField = null
+                            editingId = null
+                            editingText = ""
+                        }
+                    },
+                    onPickSuggestion = { entry ->
+                        val editTargetId = if (editingField == field) editingId else null
+                        if (editTargetId != null) {
+                            updateList(
+                                field,
+                                listFor(field).map {
+                                    if (it.id == editTargetId) {
+                                        it.copy(name = entry.name, email = entry.email)
+                                    } else {
+                                        it
+                                    }
+                                }
+                            )
+                            editingField = null
+                            editingId = null
+                            editingText = ""
+                        } else {
+                            addUniqueRecipients(field, listOf(entry.name to entry.email))
+                            setInput(field, "")
+                        }
+                        onClearSuggestions()
+                    }
                 )
-                if (!showBcc) {
-                    TextButton(onClick = { showBcc = true }) {
-                        Text("СК")
+            }
+
+            renderSection(ActiveRecipientField.TO, ParticipantRole.TO) {
+                Row {
+                    if (!showCc) {
+                        TextButton(onClick = { showCc = true }) { Text("+ Копия") }
+                    }
+                    if (!showBcc) {
+                        TextButton(onClick = { showBcc = true }) { Text("+ СК") }
                     }
                 }
+            }
+
+            if (showCc) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+                renderSection(ActiveRecipientField.CC, ParticipantRole.CC)
             }
 
             if (showBcc) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = bcc,
-                    onValueChange = {
-                        bcc = it
-                        activeField = ActiveRecipientField.BCC
-                        onSearchDirectory(it)
-                    },
-                    label = { Text("Скрытая копия") },
-                    singleLine = true,
-                    enabled = !isSending,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    modifier = Modifier.fillMaxWidth()
-                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+                renderSection(ActiveRecipientField.BCC, ParticipantRole.BCC)
             }
 
-            if (directorySuggestions.isNotEmpty()) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp)
-                ) {
-                    Column {
-                        directorySuggestions.forEachIndexed { idx, entry ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        when (activeField) {
-                                            ActiveRecipientField.TO -> to = appendRecipient(to, entry.email)
-                                            ActiveRecipientField.CC -> cc = appendRecipient(cc, entry.email)
-                                            ActiveRecipientField.BCC -> bcc = appendRecipient(bcc, entry.email)
-                                        }
-                                        onClearSuggestions()
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                UserAvatar(
-                                    name = entry.name,
-                                    email = entry.email,
-                                    photo = avatars[entry.email.trim().lowercase()],
-                                    size = 32.dp,
-                                    onRequestLoad = onRequestAvatar
-                                )
-                                Spacer(Modifier.size(10.dp))
-                                Column {
-                                    Text(entry.name, style = MaterialTheme.typography.bodyMedium)
-                                    Text(
-                                        entry.email,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                            if (idx < directorySuggestions.lastIndex) HorizontalDivider()
-                        }
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(10.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             OutlinedTextField(
                 value = subject,
@@ -445,6 +639,266 @@ fun ComposeScreen(
                 modifier = Modifier.fillMaxWidth()
             )
         }
+    }
+}
+
+@Composable
+private fun RecipientStripSection(
+    role: ParticipantRole,
+    recipients: List<ComposeRecipient>,
+    inputText: String,
+    editingId: Long?,
+    editingText: String,
+    avatars: Map<String, ImageBitmap?>,
+    personProfiles: Map<String, PersonProfile?>,
+    enabled: Boolean,
+    suggestions: List<ContactEntry>,
+    headerExtra: @Composable () -> Unit,
+    onRequestAvatar: (String) -> Unit,
+    onRequestPersonProfile: (name: String, email: String) -> Unit,
+    onInputChange: (String) -> Unit,
+    onInputFocusChanged: (Boolean) -> Unit,
+    onInputDone: () -> Unit,
+    onStartEdit: (ComposeRecipient) -> Unit,
+    onEditTextChange: (String) -> Unit,
+    onCommitEdit: () -> Unit,
+    onRemove: (ComposeRecipient) -> Unit,
+    onPickSuggestion: (ContactEntry) -> Unit
+) {
+    val badgeBg = when (role) {
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.primaryContainer
+    }
+    val badgeText = when (role) {
+        ParticipantRole.TO -> MaterialTheme.colorScheme.onTertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.50f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.70f)
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onPrimaryContainer
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                color = badgeBg,
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    text = role.labelRu,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = badgeText,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+            headerExtra()
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(end = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items(recipients, key = { it.id }) { rec ->
+                if (editingId == rec.id) {
+                    val focusRequester = remember { FocusRequester() }
+                    var hadFocus by remember { mutableStateOf(false) }
+                    LaunchedEffect(rec.id) {
+                        runCatching { focusRequester.requestFocus() }
+                    }
+                    OutlinedTextField(
+                        value = editingText,
+                        onValueChange = onEditTextChange,
+                        singleLine = true,
+                        enabled = enabled,
+                        placeholder = { Text("Email...") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { onCommitEdit() }),
+                        modifier = Modifier
+                            .width(200.dp)
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { fs ->
+                                if (fs.isFocused) {
+                                    hadFocus = true
+                                } else if (hadFocus) {
+                                    hadFocus = false
+                                    onCommitEdit()
+                                }
+                            }
+                    )
+                } else {
+                    ComposeRecipientTile(
+                        recipient = rec,
+                        role = role,
+                        photo = avatars[rec.email.trim().lowercase()],
+                        profile = personProfiles[rec.email.trim().lowercase()],
+                        enabled = enabled,
+                        onRequestAvatar = onRequestAvatar,
+                        onRequestProfile = { onRequestPersonProfile(rec.name, rec.email) },
+                        onClick = { if (enabled) onStartEdit(rec) },
+                        onRemove = { if (enabled) onRemove(rec) }
+                    )
+                }
+            }
+
+            item(key = "input-${role.name}") {
+                var hadFocus by remember { mutableStateOf(false) }
+                OutlinedTextField(
+                    value = inputText,
+                    onValueChange = onInputChange,
+                    placeholder = { Text("Добавить email...") },
+                    singleLine = true,
+                    enabled = enabled,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Email,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(onDone = { onInputDone() }),
+                    modifier = Modifier
+                        .width(195.dp)
+                        .onFocusChanged { fs ->
+                            if (fs.isFocused) {
+                                hadFocus = true
+                                onInputFocusChanged(true)
+                            } else if (hadFocus) {
+                                hadFocus = false
+                                onInputFocusChanged(false)
+                            }
+                        }
+                )
+            }
+        }
+
+        if (suggestions.isNotEmpty()) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+            ) {
+                Column {
+                    suggestions.forEachIndexed { idx, entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPickSuggestion(entry) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            UserAvatar(
+                                name = entry.name,
+                                email = entry.email,
+                                photo = avatars[entry.email.trim().lowercase()],
+                                size = 32.dp,
+                                onRequestLoad = onRequestAvatar
+                            )
+                            Spacer(Modifier.size(10.dp))
+                            Column {
+                                Text(entry.name, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    entry.email,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        if (idx < suggestions.lastIndex) HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposeRecipientTile(
+    recipient: ComposeRecipient,
+    role: ParticipantRole,
+    photo: ImageBitmap?,
+    profile: PersonProfile?,
+    enabled: Boolean,
+    onRequestAvatar: (String) -> Unit,
+    onRequestProfile: () -> Unit,
+    onClick: () -> Unit,
+    onRemove: () -> Unit
+) {
+    LaunchedEffect(recipient.email) {
+        if ('@' in recipient.email &&
+            (recipient.name.isBlank() || recipient.name.equals(recipient.email, ignoreCase = true))
+        ) {
+            onRequestProfile()
+        }
+    }
+
+    val resolvedName = profile?.displayName?.takeIf { it.isNotBlank() } ?: recipient.name
+    val nameColor = when (role) {
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiary
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onSurface
+    }
+
+    Column(
+        modifier = Modifier
+            .width(78.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(modifier = Modifier.size(48.dp)) {
+            UserAvatar(
+                name = resolvedName,
+                email = recipient.email,
+                photo = photo,
+                size = 42.dp,
+                onRequestLoad = onRequestAvatar,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .then(
+                        if (role == ParticipantRole.TO) {
+                            Modifier.border(1.5.dp, MaterialTheme.colorScheme.tertiary, CircleShape)
+                        } else {
+                            Modifier
+                        }
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(enabled = enabled, onClick = onRemove),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Удалить",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = formatShortPersonName(resolvedName, recipient.email),
+            style = MaterialTheme.typography.labelSmall,
+            color = nameColor,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = if (role == ParticipantRole.TO) FontWeight.Medium else FontWeight.Normal
+        )
     }
 }
 
