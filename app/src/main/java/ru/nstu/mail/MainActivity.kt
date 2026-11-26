@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.nstu.mail.ui.ComposeScreen
 import ru.nstu.mail.ui.LoginScreen
@@ -15,6 +16,7 @@ import ru.nstu.mail.ui.MessageDetailScreen
 import ru.nstu.mail.ui.NstuMailTheme
 import ru.nstu.mail.ui.OwaWebViewScreen
 import ru.nstu.mail.ui.Screen
+import ru.nstu.mail.ui.UpdateDialog
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -24,6 +26,18 @@ class MainActivity : ComponentActivity() {
             NstuMailTheme {
                 val vm: MailViewModel = viewModel()
                 val state by vm.state.collectAsState()
+                val context = LocalContext.current
+
+                state.availableUpdate?.let { update ->
+                    UpdateDialog(
+                        update = update,
+                        downloadProgress = state.updateDownloadProgress,
+                        isDownloaded = state.downloadedUpdatePath != null,
+                        errorMessage = state.updateError,
+                        onInstallOrDownload = { vm.downloadAndInstallUpdate(context) },
+                        onDismiss = vm::dismissUpdate
+                    )
+                }
 
                 when (val screen = state.screen) {
                     Screen.Login -> LoginScreen(
@@ -44,6 +58,7 @@ class MainActivity : ComponentActivity() {
                         onOpenMessage = vm::openMessage,
                         onCompose = { vm.openCompose() },
                         onOpenOwa = vm::openOwaFromMailList,
+                        onCheckUpdates = { vm.checkForUpdates(manual = true) },
                         onLogout = vm::logout,
                         onClearToast = vm::clearToast
                     )

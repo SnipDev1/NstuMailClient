@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -69,6 +70,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import ru.nstu.mail.BuildConfig
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.MailFolderType
 
@@ -83,6 +85,7 @@ fun MailListScreen(
     onOpenMessage: (EmailSummary) -> Unit,
     onCompose: () -> Unit,
     onOpenOwa: () -> Unit,
+    onCheckUpdates: () -> Unit,
     onLogout: () -> Unit,
     onClearToast: () -> Unit
 ) {
@@ -148,6 +151,17 @@ fun MailListScreen(
                     onClick = {
                         scope.launch { drawerState.close() }
                         onOpenOwa()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                NavigationDrawerItem(
+                    label = { Text("Проверить обновления (v${BuildConfig.VERSION_NAME})") },
+                    selected = false,
+                    icon = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onCheckUpdates()
                     },
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )

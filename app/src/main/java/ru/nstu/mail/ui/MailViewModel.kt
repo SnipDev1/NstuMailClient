@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import androidx.core.content.FileProvider
@@ -20,6 +21,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.nstu.mail.BuildConfig
+import ru.nstu.mail.data.AppUpdateInfo
+import ru.nstu.mail.data.AppUpdater
 import ru.nstu.mail.data.AttachmentInfo
 import ru.nstu.mail.data.CredentialStore
 import ru.nstu.mail.data.Credentials
@@ -63,23 +67,31 @@ data class MailUiState(
     val messages: List<EmailSummary> = emptyList(),
     val searchQuery: String = "",
     val reachedEnd: Boolean = true,
-    val selectedMessage: EmailDetail? = null
+    val selectedMessage: EmailDetail? = null,
+    val availableUpdate: AppUpdateInfo? = null,
+    val isCheckingUpdate: Boolean = false,
+    val updateDownloadProgress: Float? = null,
+    val downloadedUpdatePath: String? = null,
+    val updateError: String? = null
 )
 
 class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = CredentialStore(application)
+    private val updater = AppUpdater()
     private val _state = MutableStateFlow(MailUiState())
     val state: StateFlow<MailUiState> = _state.asStateFlow()
 
     private var client: EwsClient? = null
 
     init {
+        File(application.cacheDir, "updates").deleteRecursively()
         val saved = store.load()
         if (saved != null) {
             _state.update { it.copy(credentials = saved) }
             login(saved.email, saved.password, saved.serverUrl)
         }
+        checkForUpdates(manual = false)
     }
 
     fun login(email: String, password: String, serverUrl: String = DEFAULT_SERVER_URL) {
@@ -432,6 +444,123 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearError() {
         _state.update { it.copy(errorMessage = null) }
+    }
+
+    fun checkForUpdates(manual: Boolean) {
+        if (_state.value.isCheckingUpdate) return
+        viewModelScope.launch {
+            _state.update { it.copy(isCheckingUpdate = true) }
+            try {
+                val update = updater.checkLatestRelease()
+                _state.update { st ->
+                    st.copy(
+                        isCheckingUpdate = false,
+                        availableUpdate = update ?: st.availableUpdate,
+                        downloadedUpdatePath = if (update != null) null else st.downloadedUpdatePath,
+                        updateDownloadProgress = if (update != null) null else st.updateDownloadProgress,
+                        updateError = null,
+                        toastMessage = if (manual && update == null) {
+                            "Установлена последняя версия (${BuildConfig.VERSION_NAME})"
+                        } else {
+                            st.toastMessage
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { st ->
+                    st.copy(
+                        isCheckingUpdate = false,
+                        toastMessage = if (manual) {
+                            "Не удалось проверить обновления: ${e.localizedMessage ?: "ошибка сети"}"
+                        } else {
+                            st.toastMessage
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        _state.update {
+            it.copy(
+                availableUpdate = null,
+                updateDownloadProgress = null,
+                updateError = null
+            )
+        }
+    }
+
+    fun downloadAndInstallUpdate(context: Context) {
+        val update = _state.value.availableUpdate ?: return
+        val existingPath = _state.value.downloadedUpdatePath
+        if (existingPath != null) {
+            val file = File(existingPath)
+            if (file.exists()) {
+                launchApkInstaller(context, file)
+                return
+            }
+        }
+
+        if (_state.value.updateDownloadProgress != null) return
+        val destFile = File(File(context.cacheDir, "updates"), "NstuMail-${update.tagName}.apk")
+
+        viewModelScope.launch {
+            _state.update { it.copy(updateDownloadProgress = 0f, updateError = null) }
+            try {
+                updater.downloadApk(update.apkUrl, destFile) { progress ->
+                    _state.update { it.copy(updateDownloadProgress = progress) }
+                }
+                _state.update {
+                    it.copy(
+                        updateDownloadProgress = 1f,
+                        downloadedUpdatePath = destFile.absolutePath
+                    )
+                }
+                launchApkInstaller(context, destFile)
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        updateDownloadProgress = null,
+                        downloadedUpdatePath = null,
+                        updateError = e.localizedMessage ?: "Ошибка загрузки обновления"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun launchApkInstaller(context: Context, apkFile: File) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            val permIntent = Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(permIntent) }
+            _state.update {
+                it.copy(
+                    toastMessage = "Разрешите установку из этого источника и нажмите «Установить» ещё раз"
+                )
+            }
+            return
+        }
+
+        val apkUri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            apkFile
+        )
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching {
+            context.startActivity(installIntent)
+        }.onFailure { err ->
+            _state.update {
+                it.copy(updateError = err.localizedMessage ?: "Не удалось открыть установщик APK")
+            }
+        }
     }
 
     private suspend fun saveBytesToDownloads(

@@ -14,6 +14,9 @@
 - **Безопасность**:
   - Учётные данные не зашиты в код; после входа шифруются через `AndroidKeyStore` (`AES-256-GCM`) и сохраняются локально.
   - Разрешён только HTTPS (`cleartextTrafficPermitted="false"`).
+- **Автообновления из GitHub Releases**:
+  - При запуске (и вручную через боковое меню) приложение проверяет последний релиз репозитория `SnipDev1/NstuMailApk`.
+  - Для выпуска обновления создайте GitHub Release с тегом формата `v1.0.1` (выше `versionName` в `app/build.gradle.kts`) и прикрепите `.apk` (подписанный тем же ключом, что и установленная версия).
 
 ## Сборка в Android Studio / Gradle
 1. Откройте папку проекта в **Android Studio** (требуется JDK 17 и Android SDK API 35) — Android Studio автоматически подтянет Gradle Wrapper 8.9.
