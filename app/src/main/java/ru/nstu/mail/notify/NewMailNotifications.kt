@@ -40,6 +40,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import ru.nstu.mail.MainActivity
 import ru.nstu.mail.R
 import ru.nstu.mail.data.CredentialStore
@@ -48,13 +50,16 @@ import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.MailRulesStore
+import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
+import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.isNstuSender
 import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.shouldNotifyForMessage
 import ru.nstu.mail.data.shouldRouteToUnsorted
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 const val EXTRA_MESSAGE_ID = "extra_message_id"
@@ -68,13 +73,55 @@ enum class NotificationMode(val labelRu: String, val descriptionRu: String) {
     PERIODIC("По расписанию", "Экономный режим (15–60 мин, без строки в шторке)")
 }
 
+fun messageSeenKeys(msg: EmailSummary): List<String> = buildList {
+    if (msg.id.isNotBlank()) add(msg.id)
+    val mid = msg.internetMessageId.trim().lowercase()
+    if (mid.isNotEmpty()) {
+        add("mid:$mid")
+    } else {
+        val subj = msg.subject.trim().lowercase()
+        val recv = msg.receivedAt.trim()
+        if (recv.isNotEmpty()) add("sr:$subj|$recv")
+    }
+}
+
+fun isMessageSeen(msg: EmailSummary, seenKeys: Set<String>): Boolean =
+    messageSeenKeys(msg).any { it in seenKeys }
+
+fun messageGroupKey(msg: EmailSummary): String {
+    val mid = msg.internetMessageId.trim().lowercase()
+    if (mid.isNotEmpty()) return "mid:$mid"
+    val subj = msg.subject.trim().lowercase()
+    val recv = msg.receivedAt.trim()
+    if (subj.isNotEmpty() || recv.isNotEmpty()) return "sr:$subj|$recv"
+    return "id:${msg.id}"
+}
+
+fun shouldProcessMonitoredMessage(
+    msg: EmailSummary,
+    sourceFolderIds: Set<String>,
+    isInbox: Boolean,
+    baselineReady: Boolean,
+    baselinedFolderIds: Set<String>,
+    lastSyncMs: Long,
+    seenKeys: Set<String>
+): Boolean {
+    if (!baselineReady) return false
+    if (isMessageSeen(msg, seenKeys)) return false
+    if (isInbox || sourceFolderIds.any { it in baselinedFolderIds }) return true
+    if (lastSyncMs <= 0L) return false
+    val receivedMs = runCatching { Instant.parse(msg.receivedAt.trim()).toEpochMilli() }.getOrNull()
+        ?: return false
+    return receivedMs >= (lastSyncMs - 5L * 60_000L)
+}
+
 fun selectNewMessagesToNotify(
     unread: List<EmailSummary>,
     seenIds: Set<String>,
     initialized: Boolean
 ): List<EmailSummary> {
     if (!initialized) return emptyList()
-    return unread.filter { it.id.isNotBlank() && it.id !in seenIds }
+    return unread.filter { it.id.isNotBlank() && !isMessageSeen(it, seenIds) }
 }
 
 fun mergeSeenMessageIds(
@@ -103,7 +150,11 @@ object MailNotificationHelper {
     private const val KEY_INTERVAL = "notif_interval_min"
     private const val KEY_SEEN_IDS = "notif_seen_ids"
     private const val KEY_BASELINE_READY = "notif_baseline_ready"
+    private const val KEY_MONITORED_BASELINED_FOLDERS = "notif_baselined_folders"
+    private const val KEY_LAST_SYNC_MS = "notif_last_sync_ms"
     private const val KEY_PERM_ASKED = "notif_perm_asked"
+    private const val MAX_SEEN_KEYS = 600
+    private val fetchMutex = Mutex()
 
     private const val PERIODIC_WORK_NAME = "nstumail_new_mail_poll"
     private const val IMMEDIATE_WORK_NAME = "nstumail_new_mail_now"
@@ -257,9 +308,40 @@ object MailNotificationHelper {
             .apply()
     }
 
-    fun recordSeenMessages(context: Context, messages: List<EmailSummary>) {
-        val merged = mergeSeenMessageIds(getSeenIds(context), messages.map { it.id })
+    private fun getBaselinedFolderIds(context: Context): Set<String> =
+        prefs(context).getStringSet(KEY_MONITORED_BASELINED_FOLDERS, emptySet())?.toSet().orEmpty()
+
+    private fun saveBaselinedFolderIds(context: Context, folderIds: Set<String>) {
+        prefs(context).edit().putStringSet(KEY_MONITORED_BASELINED_FOLDERS, folderIds).apply()
+    }
+
+    private fun getLastSyncTimestampMs(context: Context): Long =
+        prefs(context).getLong(KEY_LAST_SYNC_MS, 0L)
+
+    private fun saveLastSyncTimestampMs(context: Context, timestampMs: Long) {
+        prefs(context).edit().putLong(KEY_LAST_SYNC_MS, timestampMs).apply()
+    }
+
+    fun recordSeenKeys(context: Context, keys: Iterable<String>) {
+        val list = keys.filter { it.isNotBlank() }
+        if (list.isEmpty()) return
+        val merged = mergeSeenMessageIds(getSeenIds(context), list, maxSize = MAX_SEEN_KEYS)
         saveSeenIds(context, merged)
+    }
+
+    fun recordSeenMessages(context: Context, messages: List<EmailSummary>) {
+        val merged = mergeSeenMessageIds(
+            getSeenIds(context),
+            messages.flatMap { messageSeenKeys(it) },
+            maxSize = MAX_SEEN_KEYS
+        )
+        saveSeenIds(context, merged)
+        if (getLastSyncTimestampMs(context) <= 0L) {
+            saveLastSyncTimestampMs(context, System.currentTimeMillis())
+        }
+        MailRulesStore.getInboxFolderId(context)?.let { inboxId ->
+            saveBaselinedFolderIds(context, getBaselinedFolderIds(context) + inboxId)
+        }
         cancelNotifications(context)
     }
 
@@ -382,6 +464,8 @@ object MailNotificationHelper {
         prefs(context).edit()
             .remove(KEY_SEEN_IDS)
             .remove(KEY_BASELINE_READY)
+            .remove(KEY_MONITORED_BASELINED_FOLDERS)
+            .remove(KEY_LAST_SYNC_MS)
             .apply()
     }
 
@@ -389,7 +473,8 @@ object MailNotificationHelper {
         val movedFromInbox: Boolean,
         val targetFolderIds: List<String>,
         val foldersChanged: Boolean,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        val movedItemIds: List<String> = emptyList()
     )
 
     suspend fun applyAutoSortForMessage(
@@ -406,18 +491,20 @@ object MailNotificationHelper {
 
         suspend fun ensureFoldersCache(): MutableList<MailFolder>? {
             if (cache == null) {
-                cache = runCatching { client.getFolders().toMutableList() }.getOrNull()
+                cache = runCatching { client.getFolders(includeSubtreeCounts = false).toMutableList() }.getOrNull()
             }
             return cache
         }
 
-        suspend fun moveResilient(targetId: String): Result<Unit> {
-            val first = runCatching { client.moveMessages(listOf(msg.id to msg.changeKey), targetId) }
+        suspend fun moveResilient(targetId: String): Result<List<String>> {
+            val first = runCatching {
+                client.moveMessagesReturningIds(listOf(msg.id to msg.changeKey), targetId)
+            }
             if (first.isSuccess) return first
             val err = first.exceptionOrNull()
             if (err is EwsException && err.isAuthError) return first
             return if (msg.changeKey.isNotBlank()) {
-                runCatching { client.moveMessages(listOf(msg.id to ""), targetId) }
+                runCatching { client.moveMessagesReturningIds(listOf(msg.id to ""), targetId) }
             } else {
                 first
             }
@@ -452,7 +539,7 @@ object MailNotificationHelper {
                 if (child == null) {
                     val created = runCatching {
                         client.createFolder(safeName, parentFolderId = targetId)
-                        client.getFolders()
+                        client.getFolders(includeSubtreeCounts = false)
                     }.getOrNull()
                     if (created != null) {
                         workingFolders.clear()
@@ -526,7 +613,8 @@ object MailNotificationHelper {
                             movedFromInbox = true,
                             targetFolderIds = externalTargets,
                             foldersChanged = foldersChanged,
-                            errorMessage = lastError
+                            errorMessage = lastError,
+                            movedItemIds = moveRes.getOrDefault(emptyList())
                         ) to cache
                     } else {
                         lastError = moveRes.exceptionOrNull()?.message ?: lastError
@@ -563,7 +651,7 @@ object MailNotificationHelper {
                     !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
                 }
                 if (unsorted == null && workingFolders != null) {
-                    val refreshed = runCatching { client.getFolders() }.getOrNull()
+                    val refreshed = runCatching { client.getFolders(includeSubtreeCounts = false) }.getOrNull()
                     if (refreshed != null) {
                         workingFolders.clear()
                         workingFolders.addAll(refreshed)
@@ -574,7 +662,7 @@ object MailNotificationHelper {
                     if (unsorted == null) {
                         val created = runCatching {
                             client.createFolder(UNSORTED_FOLDER_NAME, parentFolderId = null)
-                            client.getFolders()
+                            client.getFolders(includeSubtreeCounts = false)
                         }.getOrElse { err ->
                             lastError = lastError ?: err.message
                             null
@@ -598,7 +686,8 @@ object MailNotificationHelper {
                         movedFromInbox = moveRes.isSuccess,
                         targetFolderIds = if (moveRes.isSuccess) listOf(unsorted.id) else emptyList(),
                         foldersChanged = foldersChanged,
-                        errorMessage = lastError
+                        errorMessage = lastError,
+                        movedItemIds = moveRes.getOrDefault(emptyList())
                     ) to cache
                 }
             }
@@ -612,62 +701,151 @@ object MailNotificationHelper {
         ) to cache
     }
 
-    suspend fun fetchUnreadAndNotify(context: Context, client: EwsClient) {
-        val unread = client.listInboxUnread(pageSize = 15)
-        val existing = getSeenIds(context)
-        val baselineReady = isBaselineReady(context)
-        val toProcess = selectNewMessagesToNotify(unread, existing.toSet(), baselineReady)
-        val merged = mergeSeenMessageIds(existing, unread.map { it.id })
-        saveSeenIds(context, merged)
-        if (toProcess.isEmpty()) return
+    internal suspend fun resolveMonitoredFolders(
+        context: Context,
+        client: EwsClient,
+        rules: List<TagSortRule> = MailRulesStore.getTagSortRules(context)
+    ): Triple<String?, List<String>, MutableList<MailFolder>?> {
+        val folders = runCatching { client.getFolders(includeSubtreeCounts = false).toMutableList() }.getOrNull()
+        val inboxId = folders?.firstOrNull { it.systemKind == SystemFolderKind.INBOX }?.id
+            ?: MailRulesStore.getInboxFolderId(context)
+        if (!inboxId.isNullOrBlank()) {
+            MailRulesStore.setInboxFolderId(context, inboxId)
+        }
+        val activeIds = folders?.map { it.id }?.toSet().orEmpty()
+        val ruleFolderIds = if (folders != null) {
+            rules.flatMap { rule ->
+                if (rule.targetFolderId !in activeIds) emptyList()
+                else if (rule.autoCreateSubfolders) collectSubtreeFolderIds(folders, rule.targetFolderId)
+                else listOf(rule.targetFolderId)
+            }
+        } else {
+            rules.map { it.targetFolderId }.filter { it.isNotBlank() }
+        }
+        val unsortedId = folders?.firstOrNull {
+            !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+        }?.id
+        val monitored = (listOfNotNull(inboxId) + ruleFolderIds + listOfNotNull(unsortedId)).distinct()
+        return Triple(inboxId, monitored, folders)
+    }
 
+    suspend fun fetchUnreadAndNotify(context: Context, client: EwsClient) = fetchMutex.withLock {
         val rules = MailRulesStore.getTagSortRules(context)
+        val (savedInboxId, monitoredIds, initialFoldersCache) = resolveMonitoredFolders(context, client, rules)
+        val unread = if (monitoredIds.isNotEmpty()) {
+            client.listUnreadInFolders(monitoredIds, pageSizePerFolder = 15)
+        } else {
+            client.listInboxUnread(pageSize = 15)
+        }
+
+        val grouped = LinkedHashMap<String, Pair<EmailSummary, MutableSet<String>>>()
+        for (msg in unread) {
+            if (msg.id.isBlank()) continue
+            val key = messageGroupKey(msg)
+            val fid = msg.parentFolderId.trim()
+            val entry = grouped[key]
+            if (entry == null) {
+                val fids = mutableSetOf<String>()
+                if (fid.isNotEmpty()) fids += fid
+                grouped[key] = msg to fids
+            } else {
+                if (fid.isNotEmpty()) entry.second += fid
+                if (savedInboxId != null && fid == savedInboxId && entry.first.parentFolderId != savedInboxId) {
+                    grouped[key] = msg to entry.second
+                }
+            }
+        }
+
+        val existingKeys = getSeenIds(context)
+        val seenSet = existingKeys.toSet()
+        val baselineReady = isBaselineReady(context)
+        val baselinedFolders = getBaselinedFolderIds(context)
+        val lastSyncMs = getLastSyncTimestampMs(context)
+        val incomingKeys = mutableListOf<String>()
+        for (msg in unread) {
+            incomingKeys += messageSeenKeys(msg)
+        }
+
         val mutedFolders = MailRulesStore.getMutedFolderIds(context).toMutableSet()
         val mutedSenders = MailRulesStore.getMutedSenders(context)
-        val savedInboxId = MailRulesStore.getInboxFolderId(context)
-        var foldersCache: MutableList<MailFolder>? = null
+        var foldersCache: MutableList<MailFolder>? = initialFoldersCache
+        val newBaselinedFolders = baselinedFolders.toMutableSet()
+        newBaselinedFolders.addAll(monitoredIds)
 
         val toNotify = mutableListOf<EmailSummary>()
-        for (msg in toProcess) {
-            val (outcome, nextCache) = applyAutoSortForMessage(
-                context = context,
-                client = client,
-                msg = msg,
-                rules = rules,
-                inboxFolderId = savedInboxId,
-                foldersCache = foldersCache
-            )
-            foldersCache = nextCache
-            if (outcome.foldersChanged) {
-                mutedFolders.clear()
-                mutedFolders.addAll(MailRulesStore.getMutedFolderIds(context))
-            }
+        if (baselineReady) {
+            for ((repMsg, sourceFolderIds) in grouped.values) {
+                val inInbox = (savedInboxId != null && savedInboxId in sourceFolderIds) || sourceFolderIds.isEmpty()
+                if (!shouldProcessMonitoredMessage(
+                        msg = repMsg,
+                        sourceFolderIds = sourceFolderIds,
+                        isInbox = inInbox,
+                        baselineReady = true,
+                        baselinedFolderIds = baselinedFolders,
+                        lastSyncMs = lastSyncMs,
+                        seenKeys = seenSet
+                    )
+                ) {
+                    continue
+                }
 
-            val shouldNotify = if (outcome.targetFolderIds.isNotEmpty()) {
-                outcome.targetFolderIds.any { fid ->
+                val effectiveFolderIds: List<String>
+                val openMsgId: String
+                if (inInbox) {
+                    val (outcome, nextCache) = applyAutoSortForMessage(
+                        context = context,
+                        client = client,
+                        msg = repMsg,
+                        rules = rules,
+                        inboxFolderId = savedInboxId,
+                        foldersCache = foldersCache
+                    )
+                    foldersCache = nextCache
+                    if (outcome.foldersChanged) {
+                        mutedFolders.clear()
+                        mutedFolders.addAll(MailRulesStore.getMutedFolderIds(context))
+                    }
+                    incomingKeys += outcome.movedItemIds
+                    newBaselinedFolders.addAll(outcome.targetFolderIds)
+                    effectiveFolderIds = outcome.targetFolderIds.ifEmpty { listOfNotNull(savedInboxId) }
+                    openMsgId = outcome.movedItemIds.firstOrNull()?.takeIf { it.isNotBlank() } ?: repMsg.id
+                } else {
+                    effectiveFolderIds = sourceFolderIds.toList()
+                    openMsgId = repMsg.id
+                }
+
+                val shouldNotify = if (effectiveFolderIds.isNotEmpty()) {
+                    effectiveFolderIds.any { fid ->
+                        shouldNotifyForMessage(
+                            senderEmail = repMsg.senderEmail,
+                            effectiveFolderId = fid,
+                            isInbox = (fid == savedInboxId),
+                            savedInboxFolderId = savedInboxId,
+                            mutedFolderIds = mutedFolders,
+                            mutedSenders = mutedSenders
+                        )
+                    }
+                } else {
                     shouldNotifyForMessage(
-                        senderEmail = msg.senderEmail,
-                        effectiveFolderId = fid,
-                        isInbox = (fid == savedInboxId),
+                        senderEmail = repMsg.senderEmail,
+                        effectiveFolderId = savedInboxId,
+                        isInbox = true,
                         savedInboxFolderId = savedInboxId,
                         mutedFolderIds = mutedFolders,
                         mutedSenders = mutedSenders
                     )
                 }
-            } else {
-                shouldNotifyForMessage(
-                    senderEmail = msg.senderEmail,
-                    effectiveFolderId = savedInboxId,
-                    isInbox = true,
-                    savedInboxFolderId = savedInboxId,
-                    mutedFolderIds = mutedFolders,
-                    mutedSenders = mutedSenders
-                )
-            }
-            if (shouldNotify) {
-                toNotify += msg
+                if (shouldNotify) {
+                    toNotify += repMsg.copy(id = openMsgId)
+                }
             }
         }
+
+        val merged = mergeSeenMessageIds(existingKeys, incomingKeys, maxSize = MAX_SEEN_KEYS)
+        saveSeenIds(context, merged)
+        saveBaselinedFolderIds(context, newBaselinedFolders)
+        saveLastSyncTimestampMs(context, System.currentTimeMillis())
+
         if (toNotify.isNotEmpty()) {
             showNewMailNotification(context, toNotify)
         }
@@ -842,14 +1020,27 @@ class MailPushService : Service() {
             var subscriptionId = ""
             try {
                 MailNotificationHelper.fetchUnreadAndNotify(applicationContext, client)
-                subscriptionId = client.createStreamingSubscription()
+                val (_, monitoredFolderIds, _) = MailNotificationHelper.resolveMonitoredFolders(applicationContext, client)
+                subscriptionId = client.createStreamingSubscription(
+                    folderIds = monitoredFolderIds,
+                    subscribeAllFolders = true
+                )
                 backoffMs = 5_000L
 
                 while (serviceScope.isActive && subscriptionId.isNotBlank()) {
                     var invalid = false
-                    client.streamInboxEvents(subscriptionId, timeoutMinutes = 25) { chunk ->
+                    client.streamInboxEvents(subscriptionId, timeoutMinutes = 10) { chunk ->
                         if (chunk.newMailItemIds.isNotEmpty()) {
-                            MailNotificationHelper.fetchUnreadAndNotify(applicationContext, client)
+                            val sysMap = client.getCachedSystemFolderIds()
+                            val monitoredSet = monitoredFolderIds.toSet()
+                            val onlyIgnoredSystemFolders = chunk.eventFolderIds.isNotEmpty() &&
+                                chunk.eventFolderIds.all { fid ->
+                                    val kind = sysMap[fid]
+                                    fid !in monitoredSet && kind != null && kind != SystemFolderKind.INBOX
+                                }
+                            if (!onlyIgnoredSystemFolders) {
+                                MailNotificationHelper.fetchUnreadAndNotify(applicationContext, client)
+                            }
                         }
                         if (chunk.subscriptionInvalid) {
                             invalid = true

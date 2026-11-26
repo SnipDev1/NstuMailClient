@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -178,6 +179,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     private var client: EwsClient? = null
     private var directoryJob: Job? = null
+    private var updateCheckJob: Job? = null
 
     init {
         File(application.cacheDir, "updates").deleteRecursively()
@@ -223,10 +225,12 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setUpdateChannel(channel: UpdateChannel) {
         if (_updateChannel.value == channel) return
+        updateCheckJob?.cancel()
         prefs.edit().putString("update_channel", channel.name).apply()
         _updateChannel.value = channel
         _state.update {
             it.copy(
+                isCheckingUpdate = false,
                 availableUpdate = null,
                 downloadedUpdatePath = null,
                 updateDownloadProgress = null,
@@ -499,6 +503,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     foldersCache = cache
                 )
                 cache = next
+                if (outcome.movedItemIds.isNotEmpty()) {
+                    MailNotificationHelper.recordSeenKeys(app, outcome.movedItemIds)
+                }
                 if (outcome.movedFromInbox) moved++
             }
         }
@@ -754,6 +761,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                                 foldersCache = cache
                             )
                             cache = nextCache
+                            if (outcome.movedItemIds.isNotEmpty()) {
+                                MailNotificationHelper.recordSeenKeys(app, outcome.movedItemIds)
+                            }
                             if (outcome.movedFromInbox || outcome.foldersChanged) {
                                 anyChanged = true
                             }
@@ -1245,6 +1255,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     foldersCache = foldersCache
                 )
                 foldersCache = nextCache
+                if (outcome.movedItemIds.isNotEmpty()) {
+                    MailNotificationHelper.recordSeenKeys(app, outcome.movedItemIds)
+                }
                 if (outcome.foldersChanged) {
                     folderListChanged = true
                 }
@@ -1939,12 +1952,14 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkForUpdates(manual: Boolean) {
-        if (_state.value.isCheckingUpdate) return
+        if (!manual && updateCheckJob?.isActive == true) return
+        if (manual) updateCheckJob?.cancel()
         val channel = _updateChannel.value
-        viewModelScope.launch {
+        updateCheckJob = viewModelScope.launch {
             _state.update { it.copy(isCheckingUpdate = true) }
             try {
                 val update = updater.checkLatestRelease(channel = channel)
+                if (_updateChannel.value != channel) return@launch
                 _state.update { st ->
                     st.copy(
                         isCheckingUpdate = false,
@@ -1959,7 +1974,10 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                if (_updateChannel.value != channel) return@launch
                 _state.update { st ->
                     st.copy(
                         isCheckingUpdate = false,

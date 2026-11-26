@@ -264,3 +264,52 @@ fun shouldNotifyForMessage(
     }
     return true
 }
+
+private data class ParsedSemVer(val core: List<Int>, val pre: List<String>)
+
+private fun parseSemVerOrNull(raw: String): ParsedSemVer? {
+    val trimmed = raw.trim().removePrefix("v").removePrefix("V").substringBefore('+').trim()
+    if (trimmed.isEmpty()) return null
+    val coreStr = trimmed.substringBefore('-').trim()
+    if (coreStr.isEmpty()) return null
+    val core = coreStr.split('.').map { it.toIntOrNull() ?: return null }
+    val pre = if ('-' in trimmed) {
+        trimmed.substringAfter('-').split('.').filter { it.isNotBlank() }
+    } else {
+        emptyList()
+    }
+    return ParsedSemVer(core = core, pre = pre)
+}
+
+/** Compares two SemVer tags/versions; returns -1 if [a] is invalid. */
+fun compareSemVer(a: String, b: String): Int {
+    val va = parseSemVerOrNull(a) ?: return -1
+    val vb = parseSemVerOrNull(b) ?: return 0
+    val maxCore = maxOf(va.core.size, vb.core.size)
+    for (i in 0 until maxCore) {
+        val r = va.core.getOrElse(i) { 0 }
+        val c = vb.core.getOrElse(i) { 0 }
+        if (r != c) return r.compareTo(c)
+    }
+    if (va.pre.isEmpty() && vb.pre.isEmpty()) return 0
+    if (va.pre.isEmpty()) return 1
+    if (vb.pre.isEmpty()) return -1
+
+    val maxPre = maxOf(va.pre.size, vb.pre.size)
+    for (i in 0 until maxPre) {
+        if (i >= va.pre.size) return -1
+        if (i >= vb.pre.size) return 1
+        val pa = va.pre[i]
+        val pb = vb.pre[i]
+        val na = pa.toIntOrNull()
+        val nb = pb.toIntOrNull()
+        val cmp = when {
+            na != null && nb != null -> na.compareTo(nb)
+            na != null -> -1
+            nb != null -> 1
+            else -> pa.compareTo(pb)
+        }
+        if (cmp != 0) return cmp
+    }
+    return 0
+}

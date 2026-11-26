@@ -68,4 +68,48 @@ class DesktopStorageTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `DesktopUpdater picks highest semver prerelease regardless of array order`() {
+        val json = """
+            [
+              {
+                "tag_name": "v1.0.6-test.9",
+                "draft": false,
+                "prerelease": true,
+                "body": "Older test",
+                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.6-test.9",
+                "assets": []
+              },
+              {
+                "tag_name": "v1.0.6-test.13",
+                "draft": false,
+                "prerelease": true,
+                "body": "Newest test",
+                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.6-test.13",
+                "assets": []
+              },
+              {
+                "tag_name": "v1.0.7-alpha.2",
+                "draft": false,
+                "prerelease": true,
+                "body": "Alpha",
+                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.7-alpha.2",
+                "assets": []
+              },
+              {
+                "tag_name": "v1.0.7-beta.1",
+                "draft": false,
+                "prerelease": true,
+                "body": "Beta",
+                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.7-beta.1",
+                "assets": []
+              }
+            ]
+        """.trimIndent()
+
+        val best = DesktopUpdater().parseReleaseList(json, currentVersion = "1.0.6-test.5", allowPrerelease = true)
+        assertEquals("v1.0.7-beta.1", best?.tagName)
+        assertNull(DesktopUpdater().parseReleaseList(json, currentVersion = "1.0.7", allowPrerelease = true))
+    }
 }

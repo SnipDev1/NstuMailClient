@@ -39,8 +39,11 @@ import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.shouldNotifyForMessage
 import ru.nstu.mail.data.shouldRouteToUnsorted
 import ru.nstu.mail.data.sortTagTemplatesHierarchically
+import ru.nstu.mail.notify.isMessageSeen
 import ru.nstu.mail.notify.mergeSeenMessageIds
+import ru.nstu.mail.notify.messageSeenKeys
 import ru.nstu.mail.notify.selectNewMessagesToNotify
+import ru.nstu.mail.notify.shouldProcessMonitoredMessage
 import ru.nstu.mail.ui.extractInitials
 import ru.nstu.mail.ui.finalizeRecipientToken
 import ru.nstu.mail.ui.formatShortPersonName
@@ -1165,5 +1168,155 @@ class EwsXmlTest {
         val deduped = deduplicateSummaries(listOf(a, b))
         assertEquals(1, deduped.size)
         assertTrue(deduped[0].isRead)
+    }
+
+    @Test
+    fun `autosort monitored folders parse parent folder ids, streaming move events, and deduplicate across moves`() {
+        val subAll = EwsXml.buildStreamingSubscribeRequest(subscribeAllFolders = true)
+        assertTrue(subAll.contains("""SubscribeToAllFolders="true""""))
+        assertTrue(subAll.contains("<t:EventType>MovedEvent</t:EventType>"))
+        assertTrue(subAll.contains("<t:EventType>CreatedEvent</t:EventType>"))
+
+        val subExplicit = EwsXml.buildStreamingSubscribeRequest(folderIds = listOf("f-sort-1", "f-unsorted"))
+        assertTrue(subExplicit.contains("""<t:DistinguishedFolderId Id="inbox"/>"""))
+        assertTrue(subExplicit.contains("""<t:FolderId Id="f-sort-1"/>"""))
+        assertTrue(subExplicit.contains("""<t:FolderId Id="f-unsorted"/>"""))
+
+        val movedChunk = """
+            <Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/">
+              <Body>
+                <m:GetStreamingEventsResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                              xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:GetStreamingEventsResponseMessage ResponseClass="Success">
+                      <m:Notifications>
+                        <m:Notification>
+                          <t:MovedEvent>
+                            <t:ItemId Id="MOVED1"/>
+                            <t:ParentFolderId Id="f-sort-1"/>
+                          </t:MovedEvent>
+                          <t:CreatedEvent>
+                            <t:FolderId Id="f-new-sub"/>
+                          </t:CreatedEvent>
+                        </m:Notification>
+                      </m:Notifications>
+                      <m:ConnectionStatus>OK</m:ConnectionStatus>
+                    </m:GetStreamingEventsResponseMessage>
+                  </m:ResponseMessages>
+                </m:GetStreamingEventsResponse>
+              </Body>
+            </Envelope>
+        """.trimIndent()
+        val parsedChunk = EwsXml.parseStreamingChunkEvents(movedChunk)
+        assertEquals(listOf("MOVED1"), parsedChunk.newMailItemIds)
+        assertEquals(listOf("f-sort-1"), parsedChunk.eventFolderIds)
+
+        val moveResp = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:MoveItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:MoveItemResponseMessage ResponseClass="Success">
+                      <m:ResponseCode>NoError</m:ResponseCode>
+                      <m:Items>
+                        <t:Message><t:ItemId Id="NEW-MOVED-ID" ChangeKey="ck-2"/></t:Message>
+                      </m:Items>
+                    </m:MoveItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:MoveItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        assertEquals(listOf("NEW-MOVED-ID"), EwsXml.parseMovedItemIds(moveResp))
+
+        val multiFolderFindXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items />
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="m-sorted" ChangeKey="ck1"/>
+                            <t:Subject>Лекция ["Учёба", "Физика"]</t:Subject>
+                            <t:DateTimeReceived>2026-11-27T00:10:00Z</t:DateTimeReceived>
+                            <t:InternetMessageId>&lt;lec@nstu.ru&gt;</t:InternetMessageId>
+                            <t:IsRead>false</t:IsRead>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val foundByFolder = EwsXml.parseFindItemsByFolderResponse(multiFolderFindXml, listOf("f-inbox", "f-sort-sub"))
+        assertEquals(1, foundByFolder.size)
+        assertEquals("f-sort-sub", foundByFolder[0].parentFolderId)
+
+        // Same email moved from Inbox -> Autosort folder has new ItemId but same InternetMessageId
+        val inboxCopy = foundByFolder[0].copy(id = "m-inbox-old", parentFolderId = "f-inbox")
+        val seenAfterInbox = messageSeenKeys(inboxCopy).toSet()
+        assertTrue(isMessageSeen(foundByFolder[0], seenAfterInbox))
+
+        // Unseen email in a baselined autosort folder triggers notification
+        assertTrue(
+            shouldProcessMonitoredMessage(
+                msg = foundByFolder[0],
+                sourceFolderIds = setOf("f-sort-sub"),
+                isInbox = false,
+                baselineReady = true,
+                baselinedFolderIds = setOf("f-inbox", "f-sort-sub"),
+                lastSyncMs = 1_795_738_000_000L,
+                seenKeys = emptySet()
+            )
+        )
+        // Upgrade from older version (lastSyncMs == 0) does not spam old unread mail in autosort folders
+        assertFalse(
+            shouldProcessMonitoredMessage(
+                msg = foundByFolder[0],
+                sourceFolderIds = setOf("f-sort-sub"),
+                isInbox = false,
+                baselineReady = true,
+                baselinedFolderIds = setOf("f-inbox"),
+                lastSyncMs = 0L,
+                seenKeys = emptySet()
+            )
+        )
+        // Newly created subfolder on Desktop with fresh email notifies when lastSyncMs is recent
+        val syncAt = java.time.Instant.parse("2026-11-27T00:05:00Z").toEpochMilli()
+        assertTrue(
+            shouldProcessMonitoredMessage(
+                msg = foundByFolder[0],
+                sourceFolderIds = setOf("f-sort-sub"),
+                isInbox = false,
+                baselineReady = true,
+                baselinedFolderIds = setOf("f-inbox"),
+                lastSyncMs = syncAt,
+                seenKeys = emptySet()
+            )
+        )
+        // Newly bound folder with week-old unread email does NOT spam
+        val oldMsg = foundByFolder[0].copy(receivedAt = "2026-11-20T00:00:00Z")
+        assertFalse(
+            shouldProcessMonitoredMessage(
+                msg = oldMsg,
+                sourceFolderIds = setOf("f-sort-sub"),
+                isInbox = false,
+                baselineReady = true,
+                baselinedFolderIds = setOf("f-inbox"),
+                lastSyncMs = syncAt,
+                seenKeys = emptySet()
+            )
+        )
     }
 }

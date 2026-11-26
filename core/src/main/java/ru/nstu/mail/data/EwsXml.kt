@@ -364,6 +364,7 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Preview"/>
                   <t:FieldURI FieldURI="item:Importance"/>
                   <t:FieldURI FieldURI="item:Flag"/>
+                  <t:FieldURI FieldURI="item:ParentFolderId"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
                   <t:FieldURI FieldURI="message:InternetMessageId"/>
@@ -400,8 +401,10 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Preview"/>
                   <t:FieldURI FieldURI="item:Importance"/>
                   <t:FieldURI FieldURI="item:Flag"/>
+                  <t:FieldURI FieldURI="item:ParentFolderId"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:FieldURI FieldURI="message:InternetMessageId"/>
                   <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
                   <t:ExtendedFieldURI PropertyTag="0x5D02" PropertyType="String"/>
                 </t:AdditionalProperties>
@@ -1117,57 +1120,7 @@ object EwsXml {
         val messages = doc.getElementsByTagNameNS(EWS_TYPES, "Message")
         for (i in 0 until messages.length) {
             val msg = messages.item(i) as? Element ?: continue
-            val itemIdEl = msg.firstChildElement(EWS_TYPES, "ItemId") ?: continue
-            val id = itemIdEl.getAttribute("Id")
-            val changeKey = itemIdEl.getAttribute("ChangeKey")
-            val subject = msg.firstChildText(EWS_TYPES, "Subject").ifBlank { "(Без темы)" }
-            val receivedAt = msg.firstChildText(EWS_TYPES, "DateTimeReceived")
-            val isRead = msg.firstChildText(EWS_TYPES, "IsRead").equals("true", ignoreCase = true)
-            val hasAtt = msg.firstChildText(EWS_TYPES, "HasAttachments")
-                .equals("true", ignoreCase = true)
-            val preview = msg.firstChildText(EWS_TYPES, "Preview")
-            val importance = EmailImportance.fromEws(msg.firstChildText(EWS_TYPES, "Importance"))
-            val flagStatus = msg.firstChildElement(EWS_TYPES, "Flag")
-                ?.firstChildText(EWS_TYPES, "FlagStatus").orEmpty()
-            val isFlagged = flagStatus.equals("Flagged", ignoreCase = true)
-            val internetMessageId = msg.firstChildText(EWS_TYPES, "InternetMessageId").trim()
-
-            val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
-                ?.firstChildElement(EWS_TYPES, "Mailbox")
-            val senderName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
-            var senderEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
-            if ('@' !in senderEmail) {
-                val extProps = msg.getElementsByTagNameNS(EWS_TYPES, "ExtendedProperty")
-                for (j in 0 until extProps.length) {
-                    val ep = extProps.item(j) as? Element ?: continue
-                    val tag = ep.firstChildElement(EWS_TYPES, "ExtendedFieldURI")
-                        ?.getAttribute("PropertyTag").orEmpty()
-                    if (tag.equals("0x5d01", ignoreCase = true) ||
-                        tag.equals("0x5d02", ignoreCase = true)
-                    ) {
-                        val candidate = ep.firstChildText(EWS_TYPES, "Value")
-                        if ('@' in candidate) {
-                            senderEmail = candidate
-                            break
-                        }
-                    }
-                }
-            }
-
-            items += EmailSummary(
-                id = id,
-                changeKey = changeKey,
-                subject = subject,
-                senderName = senderName.ifBlank { senderEmail.ifBlank { "Неизвестный" } },
-                senderEmail = senderEmail,
-                receivedAt = receivedAt,
-                isRead = isRead,
-                hasAttachments = hasAtt,
-                preview = preview,
-                isFlagged = isFlagged,
-                importance = importance,
-                internetMessageId = internetMessageId
-            )
+            parseSummaryMessage(msg)?.let { items += it }
         }
         val sorted = if (rootFolders.length > 1) {
             deduplicateSummaries(items)
@@ -1175,6 +1128,112 @@ object EwsXml {
             items
         }
         return sorted to includesLast
+    }
+
+    fun parseFindItemsByFolderResponse(
+        xml: String,
+        requestedFolderIds: List<String>
+    ): List<EmailSummary> {
+        val doc = parseDocument(xml)
+        val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
+        if (faults.length > 0) checkSoapErrors(doc)
+
+        val respMessages = doc.getElementsByTagNameNS(EWS_MESSAGES, "FindItemResponseMessage")
+        if (respMessages.length == 0) {
+            return parseFindItemsResponse(xml).first
+        }
+
+        val items = mutableListOf<EmailSummary>()
+        val count = minOf(respMessages.length, requestedFolderIds.size)
+        for (i in 0 until count) {
+            val respEl = respMessages.item(i) as? Element ?: continue
+            if (!respEl.getAttribute("ResponseClass").equals("Success", ignoreCase = true)) continue
+            val rootFolder = respEl.firstChildElement(EWS_MESSAGES, "RootFolder") ?: continue
+            val fallbackFolderId = requestedFolderIds[i]
+            val messages = rootFolder.getElementsByTagNameNS(EWS_TYPES, "Message")
+            for (j in 0 until messages.length) {
+                val msg = messages.item(j) as? Element ?: continue
+                parseSummaryMessage(msg, fallbackFolderId)?.let { items += it }
+            }
+        }
+        return items
+    }
+
+    private fun parseSummaryMessage(
+        msg: Element,
+        fallbackParentFolderId: String = ""
+    ): EmailSummary? {
+        val itemIdEl = msg.firstChildElement(EWS_TYPES, "ItemId") ?: return null
+        val id = itemIdEl.getAttribute("Id")
+        val changeKey = itemIdEl.getAttribute("ChangeKey")
+        val subject = msg.firstChildText(EWS_TYPES, "Subject").ifBlank { "(Без темы)" }
+        val receivedAt = msg.firstChildText(EWS_TYPES, "DateTimeReceived")
+        val isRead = msg.firstChildText(EWS_TYPES, "IsRead").equals("true", ignoreCase = true)
+        val hasAtt = msg.firstChildText(EWS_TYPES, "HasAttachments")
+            .equals("true", ignoreCase = true)
+        val preview = msg.firstChildText(EWS_TYPES, "Preview")
+        val importance = EmailImportance.fromEws(msg.firstChildText(EWS_TYPES, "Importance"))
+        val flagStatus = msg.firstChildElement(EWS_TYPES, "Flag")
+            ?.firstChildText(EWS_TYPES, "FlagStatus").orEmpty()
+        val isFlagged = flagStatus.equals("Flagged", ignoreCase = true)
+        val internetMessageId = msg.firstChildText(EWS_TYPES, "InternetMessageId").trim()
+        val parentFolderId = msg.firstChildElement(EWS_TYPES, "ParentFolderId")
+            ?.getAttribute("Id")
+            ?.trim()
+            .orEmpty()
+            .ifBlank { fallbackParentFolderId }
+
+        val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
+            ?.firstChildElement(EWS_TYPES, "Mailbox")
+        val senderName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
+        var senderEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
+        if ('@' !in senderEmail) {
+            val extProps = msg.getElementsByTagNameNS(EWS_TYPES, "ExtendedProperty")
+            for (j in 0 until extProps.length) {
+                val ep = extProps.item(j) as? Element ?: continue
+                val tag = ep.firstChildElement(EWS_TYPES, "ExtendedFieldURI")
+                    ?.getAttribute("PropertyTag").orEmpty()
+                if (tag.equals("0x5d01", ignoreCase = true) ||
+                    tag.equals("0x5d02", ignoreCase = true)
+                ) {
+                    val candidate = ep.firstChildText(EWS_TYPES, "Value")
+                    if ('@' in candidate) {
+                        senderEmail = candidate
+                        break
+                    }
+                }
+            }
+        }
+
+        return EmailSummary(
+            id = id,
+            changeKey = changeKey,
+            subject = subject,
+            senderName = senderName.ifBlank { senderEmail.ifBlank { "Неизвестный" } },
+            senderEmail = senderEmail,
+            receivedAt = receivedAt,
+            isRead = isRead,
+            hasAttachments = hasAtt,
+            preview = preview,
+            isFlagged = isFlagged,
+            importance = importance,
+            internetMessageId = internetMessageId,
+            parentFolderId = parentFolderId
+        )
+    }
+
+    fun parseMovedItemIds(xml: String): List<String> {
+        val doc = parseDocument(xml)
+        val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
+        if (faults.length > 0) checkSoapErrors(doc)
+        val ids = mutableListOf<String>()
+        val itemNodes = doc.getElementsByTagNameNS(EWS_TYPES, "ItemId")
+        for (i in 0 until itemNodes.length) {
+            val el = itemNodes.item(i) as? Element ?: continue
+            val id = el.getAttribute("Id").trim()
+            if (id.isNotEmpty()) ids += id
+        }
+        return ids.distinct()
     }
 
     fun parseGetItemResponse(xml: String): EmailDetail {
@@ -1279,19 +1338,55 @@ object EwsXml {
     data class StreamingChunkResult(
         val newMailItemIds: List<String>,
         val connectionClosed: Boolean,
-        val subscriptionInvalid: Boolean
+        val subscriptionInvalid: Boolean,
+        val eventFolderIds: List<String> = emptyList()
     )
 
-    fun buildStreamingSubscribeRequest(): String {
+    fun buildStreamingSubscribeRequest(
+        folderIds: List<String> = emptyList(),
+        subscribeAllFolders: Boolean = false
+    ): String {
+        val cleanIds = folderIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (subscribeAllFolders) {
+            return wrapSoap(
+                """
+                <m:Subscribe>
+                  <m:StreamingSubscriptionRequest SubscribeToAllFolders="true">
+                    <t:EventTypes>
+                      <t:EventType>NewMailEvent</t:EventType>
+                      <t:EventType>MovedEvent</t:EventType>
+                      <t:EventType>CreatedEvent</t:EventType>
+                    </t:EventTypes>
+                  </m:StreamingSubscriptionRequest>
+                </m:Subscribe>
+                """.trimIndent()
+            )
+        }
+        val folderXml = if (cleanIds.isEmpty()) {
+            """<t:DistinguishedFolderId Id="inbox"/>"""
+        } else {
+            (listOf("""<t:DistinguishedFolderId Id="inbox"/>""") + cleanIds.map {
+                """<t:FolderId Id="${escapeXml(it)}"/>"""
+            }).joinToString("\n                  ")
+        }
+        val eventsXml = if (cleanIds.isEmpty()) {
+            """<t:EventType>NewMailEvent</t:EventType>"""
+        } else {
+            """
+                  <t:EventType>NewMailEvent</t:EventType>
+                  <t:EventType>MovedEvent</t:EventType>
+                  <t:EventType>CreatedEvent</t:EventType>
+            """.trimIndent()
+        }
         return wrapSoap(
             """
             <m:Subscribe>
               <m:StreamingSubscriptionRequest>
                 <t:FolderIds>
-                  <t:DistinguishedFolderId Id="inbox"/>
+                  $folderXml
                 </t:FolderIds>
                 <t:EventTypes>
-                  <t:EventType>NewMailEvent</t:EventType>
+                  $eventsXml
                 </t:EventTypes>
               </m:StreamingSubscriptionRequest>
             </m:Subscribe>
@@ -1357,17 +1452,30 @@ object EwsXml {
         }
 
         val itemIds = mutableListOf<String>()
-        val events = doc.getElementsByTagNameNS(EWS_TYPES, "NewMailEvent")
-        for (i in 0 until events.length) {
-            val ev = events.item(i) as? Element ?: continue
-            val itemId = ev.firstChildElement(EWS_TYPES, "ItemId")?.getAttribute("Id")?.trim().orEmpty()
-            if (itemId.isNotBlank()) itemIds += itemId
+        val folderIds = mutableListOf<String>()
+        for (eventTag in listOf("NewMailEvent", "MovedEvent", "CreatedEvent")) {
+            val events = doc.getElementsByTagNameNS(EWS_TYPES, eventTag)
+            for (i in 0 until events.length) {
+                val ev = events.item(i) as? Element ?: continue
+                val itemId = ev.firstChildElement(EWS_TYPES, "ItemId")?.getAttribute("Id")?.trim().orEmpty()
+                if (itemId.isNotBlank()) {
+                    itemIds += itemId
+                    val parentFolderId = ev.firstChildElement(EWS_TYPES, "ParentFolderId")
+                        ?.getAttribute("Id")
+                        ?.trim()
+                        .orEmpty()
+                    if (parentFolderId.isNotBlank()) {
+                        folderIds += parentFolderId
+                    }
+                }
+            }
         }
 
         return StreamingChunkResult(
             newMailItemIds = itemIds.distinct(),
             connectionClosed = closed,
-            subscriptionInvalid = invalid
+            subscriptionInvalid = invalid,
+            eventFolderIds = folderIds.distinct()
         )
     }
 

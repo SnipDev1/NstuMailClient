@@ -10,6 +10,7 @@ import ru.nstu.mail.data.Credentials
 import ru.nstu.mail.data.DEFAULT_SERVER_URL
 import ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES
 import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.compareSemVer
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.sortTagTemplatesHierarchically
@@ -227,6 +228,7 @@ class DesktopSettingsStore(private val configDir: File = DesktopConfigPaths.defa
 
 class DesktopUpdater(
     private val repo: String = DesktopBuildInfo.GITHUB_REPO,
+    private val apiBaseUrl: String = "https://api.github.com",
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -236,9 +238,10 @@ class DesktopUpdater(
         currentVersion: String = DesktopBuildInfo.VERSION_NAME,
         channel: DesktopUpdateChannel
     ): DesktopUpdateInfo? = withContext(Dispatchers.IO) {
+        val base = apiBaseUrl.trimEnd('/')
         val url = when (channel) {
-            DesktopUpdateChannel.STABLE -> "https://api.github.com/repos/$repo/releases/latest"
-            DesktopUpdateChannel.TEST -> "https://api.github.com/repos/$repo/releases?per_page=20"
+            DesktopUpdateChannel.STABLE -> "$base/repos/$repo/releases/latest"
+            DesktopUpdateChannel.TEST -> "$base/repos/$repo/releases?per_page=50"
         }
         val req = Request.Builder()
             .url(url)
@@ -254,17 +257,26 @@ class DesktopUpdater(
             if (body.isBlank()) return@withContext null
             when (channel) {
                 DesktopUpdateChannel.STABLE -> parseRelease(JSONObject(body), currentVersion, allowPrerelease = false)
-                DesktopUpdateChannel.TEST -> {
-                    val arr = JSONArray(body)
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.optJSONObject(i) ?: continue
-                        val parsed = parseRelease(obj, currentVersion, allowPrerelease = true)
-                        if (parsed != null) return@withContext parsed
-                    }
-                    null
-                }
+                DesktopUpdateChannel.TEST -> parseReleaseList(body, currentVersion, allowPrerelease = true)
             }
         }
+    }
+
+    internal fun parseReleaseList(
+        json: String,
+        currentVersion: String,
+        allowPrerelease: Boolean
+    ): DesktopUpdateInfo? {
+        val arr = JSONArray(json)
+        var best: DesktopUpdateInfo? = null
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val candidate = parseRelease(obj, currentVersion, allowPrerelease) ?: continue
+            if (best == null || compareSemVer(candidate.tagName, best.tagName) > 0) {
+                best = candidate
+            }
+        }
+        return best
     }
 
     private fun parseRelease(
@@ -277,7 +289,7 @@ class DesktopUpdater(
         if (!allowPrerelease && isPre) return null
         val tagName = obj.optString("tag_name", "").trim()
         val versionName = tagName.removePrefix("v").removePrefix("V")
-        if (versionName.isBlank() || compareVersions(versionName, currentVersion) <= 0) return null
+        if (versionName.isBlank() || compareSemVer(tagName, currentVersion) <= 0) return null
 
         val os = System.getProperty("os.name").orEmpty().lowercase()
         val wantedExt = if ("win" in os) "-windows-x64.zip" else ".AppImage"
@@ -304,29 +316,5 @@ class DesktopUpdater(
             htmlUrl = htmlUrl,
             isPrerelease = isPre
         )
-    }
-
-    private fun compareVersions(aRaw: String, bRaw: String): Int {
-        fun parse(raw: String): Pair<List<Int>, Int?> {
-            val clean = raw.trim().removePrefix("v").removePrefix("V")
-            val mainPart = clean.substringBefore('-')
-            val suffix = clean.substringAfter('-', "")
-            val nums = mainPart.split('.').map { it.toIntOrNull() ?: 0 }
-            val preNum = Regex("""\d+""").findAll(suffix).lastOrNull()?.value?.toIntOrNull()
-            return nums to if (suffix.isEmpty()) null else (preNum ?: 0)
-        }
-        val (aNums, aPre) = parse(aRaw)
-        val (bNums, bPre) = parse(bRaw)
-        val len = maxOf(aNums.size, bNums.size)
-        for (i in 0 until len) {
-            val d = aNums.getOrElse(i) { 0 }.compareTo(bNums.getOrElse(i) { 0 })
-            if (d != 0) return d
-        }
-        return when {
-            aPre == null && bPre == null -> 0
-            aPre == null -> 1
-            bPre == null -> -1
-            else -> aPre.compareTo(bPre)
-        }
     }
 }

@@ -128,6 +128,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     private var client: EwsClient? = null
     private var pushJob: Job? = null
     private var directoryJob: Job? = null
+    private var updateCheckJob: Job? = null
 
     init {
         val saved = credStore.load()
@@ -141,6 +142,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     fun dispose() {
         pushJob?.cancel()
         directoryJob?.cancel()
+        updateCheckJob?.cancel()
         scope.cancel()
     }
 
@@ -1312,18 +1314,22 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     }
 
     fun setUpdateChannel(ch: DesktopUpdateChannel) {
+        if (_state.value.settings.updateChannel == ch) return
+        updateCheckJob?.cancel()
         updateSettings { it.copy(updateChannel = ch) }
-        _state.update { it.copy(availableUpdate = null) }
+        _state.update { it.copy(availableUpdate = null, isCheckingUpdate = false) }
         checkForUpdates(manual = false)
     }
 
     fun checkForUpdates(manual: Boolean) {
-        if (_state.value.isCheckingUpdate) return
+        if (!manual && updateCheckJob?.isActive == true) return
+        if (manual) updateCheckJob?.cancel()
         val ch = _state.value.settings.updateChannel
-        scope.launch {
+        updateCheckJob = scope.launch {
             _state.update { it.copy(isCheckingUpdate = true) }
             try {
                 val upd = updater.checkLatestRelease(channel = ch)
+                if (_state.value.settings.updateChannel != ch) return@launch
                 _state.update { st ->
                     st.copy(
                         isCheckingUpdate = false,
@@ -1335,7 +1341,10 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         }
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                if (_state.value.settings.updateChannel != ch) return@launch
                 _state.update {
                     it.copy(
                         isCheckingUpdate = false,

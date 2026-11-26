@@ -38,7 +38,9 @@ class EwsClient(private val credentials: Credentials) {
 
     // --- Folders ---
 
-    suspend fun getFolders(): List<MailFolder> = withContext(Dispatchers.IO) {
+    fun getCachedSystemFolderIds(): Map<String, SystemFolderKind> = cachedSystemIdMap
+
+    suspend fun getFolders(includeSubtreeCounts: Boolean = true): List<MailFolder> = withContext(Dispatchers.IO) {
         if (cachedSystemIdMap.isEmpty()) {
             val reqIds = listOf("msgfolderroot") + SystemFolderKind.entries.map { it.ewsId }
             val distXml = postSoapWithAuthFallback(EwsXml.buildGetDistinguishedFoldersRequest(reqIds))
@@ -53,6 +55,7 @@ class EwsClient(private val credentials: Credentials) {
 
         val findXml = postSoapWithAuthFallback(EwsXml.buildFindFoldersRequest())
         val folders = EwsXml.parseFindFoldersResponse(findXml, cachedRootFolderId, cachedSystemIdMap)
+        if (!includeSubtreeCounts) return@withContext folders
         val byId = folders.associateBy { it.id }
         val parentIds = folders.mapNotNull { it.parentId.takeIf { pid -> pid in byId } }.toSet()
         if (parentIds.isEmpty()) return@withContext folders
@@ -136,6 +139,28 @@ class EwsClient(private val credentials: Credentials) {
     suspend fun listInboxUnread(pageSize: Int = 15): List<EmailSummary> = withContext(Dispatchers.IO) {
         val xml = postSoapWithAuthFallback(EwsXml.buildFindInboxUnreadRequest(pageSize))
         EwsXml.parseFindItemsResponse(xml).first
+    }
+
+    suspend fun listUnreadInFolders(
+        folderIds: List<String>,
+        pageSizePerFolder: Int = 15
+    ): List<EmailSummary> = withContext(Dispatchers.IO) {
+        val uniqueIds = folderIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (uniqueIds.isEmpty()) return@withContext emptyList()
+        val collected = mutableListOf<EmailSummary>()
+        for (chunk in uniqueIds.chunked(20)) {
+            val xml = postSoapWithAuthFallback(
+                EwsXml.buildFindItemsRequest(
+                    folderIds = chunk,
+                    offset = 0,
+                    pageSize = pageSizePerFolder,
+                    query = null,
+                    filter = MailFilter.UNREAD
+                )
+            )
+            collected += EwsXml.parseFindItemsByFolderResponse(xml, chunk)
+        }
+        collected
     }
 
     suspend fun getMessage(itemId: String): EmailDetail = withContext(Dispatchers.IO) {
@@ -237,12 +262,19 @@ class EwsClient(private val credentials: Credentials) {
             EwsXml.parseSimpleSuccessResponse(xml)
         }
 
-    suspend fun moveMessages(items: List<Pair<String, String>>, targetFolderId: String) =
-        withContext(Dispatchers.IO) {
-            if (items.isEmpty()) return@withContext
-            val xml = postSoapWithAuthFallback(EwsXml.buildMoveItemsRequest(items, targetFolderId))
-            EwsXml.parseSimpleSuccessResponse(xml)
-        }
+    suspend fun moveMessages(items: List<Pair<String, String>>, targetFolderId: String) {
+        moveMessagesReturningIds(items, targetFolderId)
+    }
+
+    suspend fun moveMessagesReturningIds(
+        items: List<Pair<String, String>>,
+        targetFolderId: String
+    ): List<String> = withContext(Dispatchers.IO) {
+        if (items.isEmpty()) return@withContext emptyList()
+        val xml = postSoapWithAuthFallback(EwsXml.buildMoveItemsRequest(items, targetFolderId))
+        EwsXml.parseSimpleSuccessResponse(xml)
+        EwsXml.parseMovedItemIds(xml)
+    }
 
     suspend fun copyMessages(items: List<Pair<String, String>>, targetFolderId: String) =
         withContext(Dispatchers.IO) {
@@ -378,7 +410,35 @@ class EwsClient(private val credentials: Credentials) {
         }
     }
 
-    suspend fun createStreamingSubscription(): String = withContext(Dispatchers.IO) {
+    suspend fun createStreamingSubscription(
+        folderIds: List<String> = emptyList(),
+        subscribeAllFolders: Boolean = false
+    ): String = withContext(Dispatchers.IO) {
+        if (subscribeAllFolders) {
+            val allFoldersAttempt = try {
+                val xml = postSoapWithAuthFallback(
+                    EwsXml.buildStreamingSubscribeRequest(subscribeAllFolders = true)
+                )
+                EwsXml.parseSubscribeResponse(xml)
+            } catch (e: EwsException) {
+                if (e.isAuthError) throw e
+                null
+            }
+            if (!allFoldersAttempt.isNullOrBlank()) return@withContext allFoldersAttempt
+        }
+        val cleanIds = folderIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (cleanIds.isNotEmpty()) {
+            val multiAttempt = try {
+                val xml = postSoapWithAuthFallback(
+                    EwsXml.buildStreamingSubscribeRequest(folderIds = cleanIds)
+                )
+                EwsXml.parseSubscribeResponse(xml)
+            } catch (e: EwsException) {
+                if (e.isAuthError) throw e
+                null
+            }
+            if (!multiAttempt.isNullOrBlank()) return@withContext multiAttempt
+        }
         val xml = postSoapWithAuthFallback(EwsXml.buildStreamingSubscribeRequest())
         EwsXml.parseSubscribeResponse(xml)
     }
@@ -393,9 +453,10 @@ class EwsClient(private val credentials: Credentials) {
         timeoutMinutes: Int = 25,
         onChunk: suspend (EwsXml.StreamingChunkResult) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val soapBody = EwsXml.buildGetStreamingEventsRequest(subscriptionId, timeoutMinutes)
+        val clampedTimeout = timeoutMinutes.coerceIn(1, 30)
+        val soapBody = EwsXml.buildGetStreamingEventsRequest(subscriptionId, clampedTimeout)
         val streamingClient = activeClient.newBuilder()
-            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .readTimeout((clampedTimeout + 2).toLong(), TimeUnit.MINUTES)
             .build()
         val request = Request.Builder()
             .url(endpointUrl)

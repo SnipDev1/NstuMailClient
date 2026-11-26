@@ -123,6 +123,13 @@ if [ "$DRY_RUN" -eq 0 ]; then
     echo "Ошибка: тег $TAG уже существует." >&2
     exit 1
   fi
+  git fetch origin main test --tags >/dev/null 2>&1 || git fetch origin "$TARGET_BRANCH" --tags >/dev/null 2>&1 || true
+  if git rev-parse --verify "origin/$TARGET_BRANCH" >/dev/null 2>&1; then
+    if ! git merge-base --is-ancestor "origin/$TARGET_BRANCH" HEAD; then
+      echo "Ошибка: локальный HEAD отстаёт от origin/$TARGET_BRANCH. Сначала выполните git pull / rebase." >&2
+      exit 1
+    fi
+  fi
   USE_GH=0
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     USE_GH=1
@@ -205,7 +212,7 @@ ASKPASS_EOF
 }
 
 python3 - "$GRADLE_FILE" "$VERSION" <<'PY'
-import re, sys
+import re, subprocess, sys
 
 path, new_ver = sys.argv[1], sys.argv[2]
 txt = open(path, encoding="utf-8").read()
@@ -215,7 +222,19 @@ m_name = re.search(r'(versionName\s*=\s*")([^"]+)(")', txt)
 if not m_code or not m_name:
     raise SystemExit("Не найдены versionCode/versionName в app/build.gradle.kts")
 
-next_code = int(m_code.group(2)) + 1
+max_code = int(m_code.group(2))
+for ref in ("origin/main", "origin/test"):
+    res = subprocess.run(
+        ["git", "show", f"{ref}:app/build.gradle.kts"],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode == 0:
+        m_ref = re.search(r'versionCode\s*=\s*(\d+)', res.stdout)
+        if m_ref:
+            max_code = max(max_code, int(m_ref.group(1)))
+
+next_code = max_code + 1
 txt = txt[:m_code.start(2)] + str(next_code) + txt[m_code.end(2):]
 m_name = re.search(r'(versionName\s*=\s*")([^"]+)(")', txt)
 txt = txt[:m_name.start(2)] + new_ver + txt[m_name.end(2):]
@@ -268,7 +287,7 @@ git_push origin "$TAG"
 
 echo "=== Создание GitHub Release $TAG (branch=$TARGET_BRANCH, prerelease=$PRERELEASE) и загрузка сборок ==="
 if [ "$USE_GH" -eq 1 ]; then
-  GH_ARGS=(release create "$TAG" "$OUT_APK" "$OUT_APPIMAGE" "$OUT_WIN_ZIP" --repo "$REPO" --title "NstuMail $TAG" --notes "$NOTES")
+  GH_ARGS=(release create "$TAG" "$OUT_APK" "$OUT_APPIMAGE" "$OUT_WIN_ZIP" --repo "$REPO" --target "$TARGET_BRANCH" --title "NstuMail $TAG" --notes "$NOTES")
   if [ "$PRERELEASE" = "true" ]; then
     GH_ARGS+=(--prerelease)
   fi

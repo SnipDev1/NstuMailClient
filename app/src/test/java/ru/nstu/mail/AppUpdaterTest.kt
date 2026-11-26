@@ -188,7 +188,57 @@ class AppUpdaterTest {
             assertTrue(found.isPrerelease)
 
             val req = server.takeRequest()
-            assertEquals("/repos/SnipDev1/NstuMailApk/releases?per_page=20", req.path)
+            assertEquals("/repos/SnipDev1/NstuMailApk/releases?per_page=50", req.path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `test channel selects highest release even when GitHub returns releases out of semver order`() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val releasesJson = """
+                [
+                  {
+                    "tag_name": "v1.0.6-test.9",
+                    "draft": false,
+                    "prerelease": true,
+                    "body": "Older test",
+                    "assets": [
+                      {
+                        "name": "NstuMail-v1.0.6-test.9.apk",
+                        "size": 1000,
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.9/NstuMail-v1.0.6-test.9.apk"
+                      }
+                    ]
+                  },
+                  {
+                    "tag_name": "v1.0.6-test.13",
+                    "draft": false,
+                    "prerelease": true,
+                    "body": "Latest test",
+                    "assets": [
+                      {
+                        "name": "NstuMail-v1.0.6-test.13.apk",
+                        "size": 2000,
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.13/NstuMail-v1.0.6-test.13.apk"
+                      }
+                    ]
+                  }
+                ]
+            """.trimIndent()
+            server.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson))
+
+            val updater = AppUpdater(
+                repo = "SnipDev1/NstuMailApk",
+                apiBaseUrl = server.url("/").toString().trimEnd('/')
+            )
+
+            val found = updater.checkLatestRelease("1.0.6-test.5", UpdateChannel.TEST)
+            assertNotNull(found)
+            assertEquals("v1.0.6-test.13", found!!.tagName)
         } finally {
             server.shutdown()
         }
