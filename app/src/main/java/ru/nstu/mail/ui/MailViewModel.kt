@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.webkit.CookieManager
 import android.webkit.WebStorage
@@ -15,6 +16,8 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,20 +28,26 @@ import ru.nstu.mail.BuildConfig
 import ru.nstu.mail.data.AppUpdateInfo
 import ru.nstu.mail.data.AppUpdater
 import ru.nstu.mail.data.AttachmentInfo
+import ru.nstu.mail.data.CalendarEvent
+import ru.nstu.mail.data.ContactEntry
 import ru.nstu.mail.data.CredentialStore
 import ru.nstu.mail.data.Credentials
 import ru.nstu.mail.data.DEFAULT_SERVER_URL
 import ru.nstu.mail.data.EmailDetail
+import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
-import ru.nstu.mail.data.FolderInfo
-import ru.nstu.mail.data.MailFolderType
+import ru.nstu.mail.data.MailFilter
+import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.OutgoingAttachment
+import ru.nstu.mail.data.SystemFolderKind
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Base64
 import java.util.Locale
 
 sealed interface Screen {
@@ -47,8 +56,12 @@ sealed interface Screen {
     data object MessageDetail : Screen
     data class Compose(
         val replyTo: EmailDetail? = null,
-        val isForward: Boolean = false
+        val replyAll: Boolean = false,
+        val isForward: Boolean = false,
+        val draft: EmailDetail? = null
     ) : Screen
+    data object Contacts : Screen
+    data object Calendar : Screen
     data object OwaWebView : Screen
 }
 
@@ -62,12 +75,18 @@ data class MailUiState(
     val errorMessage: String? = null,
     val suggestOwaFallback: Boolean = false,
     val toastMessage: String? = null,
-    val folders: List<FolderInfo> = emptyList(),
-    val currentFolder: MailFolderType = MailFolderType.INBOX,
-    val messages: List<EmailSummary> = emptyList(),
+    val folders: List<MailFolder> = emptyList(),
+    val currentFolder: MailFolder? = null,
+    val filter: MailFilter = MailFilter.ALL,
     val searchQuery: String = "",
+    val searchAllFolders: Boolean = false,
+    val messages: List<EmailSummary> = emptyList(),
+    val selectedIds: Set<String> = emptySet(),
     val reachedEnd: Boolean = true,
     val selectedMessage: EmailDetail? = null,
+    val contacts: List<ContactEntry> = emptyList(),
+    val directorySuggestions: List<ContactEntry> = emptyList(),
+    val calendarEvents: List<CalendarEvent> = emptyList(),
     val availableUpdate: AppUpdateInfo? = null,
     val isCheckingUpdate: Boolean = false,
     val updateDownloadProgress: Float? = null,
@@ -83,6 +102,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<MailUiState> = _state.asStateFlow()
 
     private var client: EwsClient? = null
+    private var directoryJob: Job? = null
 
     init {
         File(application.cacheDir, "updates").deleteRecursively()
@@ -125,11 +145,17 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             }
             try {
                 val folders = newClient.getFolders()
-                val (items, includesLast) = newClient.listMessages(
-                    folder = MailFolderType.INBOX,
-                    offset = 0,
-                    pageSize = PAGE_SIZE
-                )
+                val inbox = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
+                    ?: folders.firstOrNull()
+                val (items, includesLast) = if (inbox != null) {
+                    newClient.listMessages(
+                        folderIds = listOf(inbox.id),
+                        offset = 0,
+                        pageSize = PAGE_SIZE
+                    )
+                } else {
+                    emptyList<EmailSummary>() to true
+                }
                 client = newClient
                 store.save(creds)
                 _state.update {
@@ -137,10 +163,13 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         screen = Screen.MailList,
                         isLoading = false,
                         folders = folders,
-                        currentFolder = MailFolderType.INBOX,
+                        currentFolder = inbox,
+                        filter = MailFilter.ALL,
+                        searchQuery = "",
+                        searchAllFolders = false,
+                        selectedIds = emptySet(),
                         messages = items,
-                        reachedEnd = includesLast,
-                        searchQuery = ""
+                        reachedEnd = includesLast
                     )
                 }
             } catch (e: EwsException) {
@@ -195,11 +224,15 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(screen = target) }
     }
 
-    fun selectFolder(folder: MailFolderType) {
+    // --- Folders & Filters ---
+
+    fun selectFolder(folder: MailFolder) {
         _state.update {
             it.copy(
                 currentFolder = folder,
                 searchQuery = "",
+                searchAllFolders = false,
+                selectedIds = emptySet(),
                 messages = emptyList(),
                 reachedEnd = true
             )
@@ -207,13 +240,26 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         loadMessages(offset = 0, reset = true)
     }
 
-    fun refresh() {
-        loadMessages(offset = 0, reset = true, asPullRefresh = true)
+    fun setFilter(filter: MailFilter) {
+        if (_state.value.filter == filter) return
+        _state.update { it.copy(filter = filter, selectedIds = emptySet()) }
+        loadMessages(offset = 0, reset = true)
     }
 
     fun search(query: String) {
-        _state.update { it.copy(searchQuery = query) }
+        _state.update { it.copy(searchQuery = query, selectedIds = emptySet()) }
         loadMessages(offset = 0, reset = true)
+    }
+
+    fun setSearchAllFolders(enabled: Boolean) {
+        _state.update { it.copy(searchAllFolders = enabled, selectedIds = emptySet()) }
+        if (_state.value.searchQuery.isNotBlank()) {
+            loadMessages(offset = 0, reset = true)
+        }
+    }
+
+    fun refresh() {
+        loadMessages(offset = 0, reset = true, asPullRefresh = true)
     }
 
     fun loadMore() {
@@ -222,10 +268,23 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         loadMessages(offset = current.messages.size, reset = false)
     }
 
+    private fun targetFolderIdsForQuery(): List<String> {
+        val st = _state.value
+        return if (st.searchQuery.isNotBlank() && st.searchAllFolders) {
+            st.folders
+                .filter { it.systemKind != SystemFolderKind.DELETED && it.systemKind != SystemFolderKind.JUNK }
+                .map { it.id }
+                .ifEmpty { listOfNotNull(st.currentFolder?.id) }
+        } else {
+            listOfNotNull(st.currentFolder?.id)
+        }
+    }
+
     private fun loadMessages(offset: Int, reset: Boolean, asPullRefresh: Boolean = false) {
         val c = client ?: return
-        val folder = _state.value.currentFolder
+        val folderIds = targetFolderIdsForQuery()
         val query = _state.value.searchQuery
+        val filter = _state.value.filter
 
         viewModelScope.launch {
             _state.update {
@@ -237,11 +296,22 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             }
             try {
                 val folders = if (reset) c.getFolders() else _state.value.folders
+                val updatedCurrent = _state.value.currentFolder?.let { cur ->
+                    folders.firstOrNull { it.id == cur.id } ?: cur
+                } ?: folders.firstOrNull()
+
+                val effectiveIds = if (folderIds.isEmpty() && updatedCurrent != null) {
+                    listOf(updatedCurrent.id)
+                } else {
+                    folderIds
+                }
+
                 val (items, includesLast) = c.listMessages(
-                    folder = folder,
+                    folderIds = effectiveIds,
                     offset = offset,
                     pageSize = PAGE_SIZE,
-                    query = query
+                    query = query,
+                    filter = filter
                 )
                 _state.update { st ->
                     val merged = if (reset) items else (st.messages + items).distinctBy { it.id }
@@ -249,6 +319,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         isLoading = false,
                         isRefreshing = false,
                         folders = folders,
+                        currentFolder = updatedCurrent,
                         messages = merged,
                         reachedEnd = includesLast
                     )
@@ -265,16 +336,321 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun createFolder(name: String, parentFolderId: String?) {
+        val c = client ?: return
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.createFolder(trimmed, parentFolderId)
+                val folders = c.getFolders()
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        folders = folders,
+                        toastMessage = "Папка «$trimmed» создана"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось создать папку"
+                    )
+                }
+            }
+        }
+    }
+
+    fun renameFolder(folder: MailFolder, newName: String) {
+        val c = client ?: return
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.renameFolder(folder.id, folder.changeKey, trimmed)
+                val folders = c.getFolders()
+                val updatedCurrent = _state.value.currentFolder?.let { cur ->
+                    folders.firstOrNull { it.id == cur.id } ?: cur
+                }
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        folders = folders,
+                        currentFolder = updatedCurrent,
+                        toastMessage = "Папка переименована"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось переименовать папку"
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteFolder(folder: MailFolder) {
+        val c = client ?: return
+        if (folder.isSystem) return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.deleteFolder(folder.id, folder.changeKey)
+                val folders = c.getFolders()
+                val fallback = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
+                    ?: folders.firstOrNull()
+                val switched = _state.value.currentFolder?.id == folder.id
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        folders = folders,
+                        currentFolder = if (switched) fallback else it.currentFolder,
+                        toastMessage = "Папка удалена"
+                    )
+                }
+                if (switched) loadMessages(offset = 0, reset = true)
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось удалить папку"
+                    )
+                }
+            }
+        }
+    }
+
+    fun emptyCurrentFolder() {
+        val c = client ?: return
+        val folder = _state.value.currentFolder ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.emptyFolder(folder.id)
+                val folders = c.getFolders()
+                val updated = folders.firstOrNull { it.id == folder.id } ?: folder
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        folders = folders,
+                        currentFolder = updated,
+                        messages = emptyList(),
+                        selectedIds = emptySet(),
+                        reachedEnd = true,
+                        toastMessage = "Папка очищена"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось очистить папку"
+                    )
+                }
+            }
+        }
+    }
+
+    fun markAllReadInCurrentFolder() {
+        val c = client ?: return
+        val folder = _state.value.currentFolder ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.markAllRead(folder.id)
+                val folders = c.getFolders()
+                val updated = folders.firstOrNull { it.id == folder.id } ?: folder
+                _state.update { st ->
+                    st.copy(
+                        isLoading = false,
+                        folders = folders,
+                        currentFolder = updated,
+                        messages = st.messages.map { it.copy(isRead = true) },
+                        toastMessage = "Все письма отмечены прочитанными"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Ошибка обновления писем"
+                    )
+                }
+            }
+        }
+    }
+
+    // --- Selection & Message Actions ---
+
+    fun toggleSelection(id: String) {
+        _state.update { st ->
+            val next = if (id in st.selectedIds) st.selectedIds - id else st.selectedIds + id
+            st.copy(selectedIds = next)
+        }
+    }
+
+    fun clearSelection() {
+        _state.update { it.copy(selectedIds = emptySet()) }
+    }
+
+    fun batchSetRead(isRead: Boolean) {
+        val c = client ?: return
+        val ids = _state.value.selectedIds
+        val pairs = _state.value.messages.filter { it.id in ids }.map { it.id to it.changeKey }
+        if (pairs.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                c.setRead(pairs, isRead)
+                _state.update { st ->
+                    st.copy(
+                        selectedIds = emptySet(),
+                        messages = st.messages.map {
+                            if (it.id in ids) it.copy(isRead = isRead) else it
+                        },
+                        toastMessage = if (isRead) "Отмечены прочитанными" else "Отмечены непрочитанными"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
+            }
+        }
+    }
+
+    fun batchMove(targetFolder: MailFolder) {
+        val c = client ?: return
+        val ids = _state.value.selectedIds
+        val pairs = _state.value.messages.filter { it.id in ids }.map { it.id to it.changeKey }
+        if (pairs.isEmpty()) return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.moveMessages(pairs, targetFolder.id)
+                val folders = c.getFolders()
+                _state.update { st ->
+                    st.copy(
+                        isLoading = false,
+                        folders = folders,
+                        selectedIds = emptySet(),
+                        messages = st.messages.filterNot { it.id in ids },
+                        toastMessage = "Перемещено в «${targetFolder.displayName}»"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось переместить письма"
+                    )
+                }
+            }
+        }
+    }
+
+    fun batchDelete() {
+        val c = client ?: return
+        val ids = _state.value.selectedIds
+        val pairs = _state.value.messages.filter { it.id in ids }.map { it.id to it.changeKey }
+        if (pairs.isEmpty()) return
+        val hardDelete = _state.value.currentFolder?.systemKind == SystemFolderKind.DELETED
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.deleteMessages(pairs, hardDelete)
+                val folders = c.getFolders()
+                _state.update { st ->
+                    st.copy(
+                        isLoading = false,
+                        folders = folders,
+                        selectedIds = emptySet(),
+                        messages = st.messages.filterNot { it.id in ids },
+                        toastMessage = if (hardDelete) "Удалено навсегда" else "Перемещено в Удалённые"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось удалить письма"
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleFlag(summary: EmailSummary) {
+        val c = client ?: return
+        val next = !summary.isFlagged
+        viewModelScope.launch {
+            try {
+                c.setFlagged(listOf(summary.id to summary.changeKey), next)
+                _state.update { st ->
+                    st.copy(
+                        messages = st.messages.map {
+                            if (it.id == summary.id) it.copy(isFlagged = next) else it
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Ошибка обновления флажка") }
+            }
+        }
+    }
+
+    fun toggleFlagDetail(detail: EmailDetail) {
+        val c = client ?: return
+        val next = !detail.isFlagged
+        viewModelScope.launch {
+            try {
+                c.setFlagged(listOf(detail.id to detail.changeKey), next)
+                _state.update { st ->
+                    st.copy(
+                        selectedMessage = st.selectedMessage?.copy(isFlagged = next),
+                        messages = st.messages.map {
+                            if (it.id == detail.id) it.copy(isFlagged = next) else it
+                        },
+                        toastMessage = if (next) "Флажок установлен" else "Флажок снят"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Ошибка обновления флажка") }
+            }
+        }
+    }
+
     fun openMessage(summary: EmailSummary) {
+        if (_state.value.selectedIds.isNotEmpty()) {
+            toggleSelection(summary.id)
+            return
+        }
         val c = client ?: return
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, errorMessage = null) }
             try {
                 var detail = c.getMessage(summary.id)
-                if (!detail.isRead) {
-                    runCatching { c.setRead(detail.id, detail.changeKey, true) }
+                if (!detail.isRead && !detail.isDraft) {
+                    runCatching { c.setRead(listOf(detail.id to detail.changeKey), true) }
                     detail = detail.copy(isRead = true)
                 }
+                if (detail.isDraft || _state.value.currentFolder?.systemKind == SystemFolderKind.DRAFTS) {
+                    _state.update {
+                        it.copy(
+                            isLoading = false,
+                            directorySuggestions = emptyList(),
+                            screen = Screen.Compose(draft = detail)
+                        )
+                    }
+                    return@launch
+                }
+
+                if (detail.isHtml && detail.attachments.any { it.isInline && it.contentId.isNotBlank() }) {
+                    detail = resolveInlineCidImages(c, detail)
+                }
+
                 _state.update { st ->
                     val updatedList = st.messages.map {
                         if (it.id == summary.id) it.copy(isRead = true) else it
@@ -297,8 +673,38 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun resolveInlineCidImages(c: EwsClient, detail: EmailDetail): EmailDetail {
+        var html = detail.body
+        val inlineImages = detail.attachments
+            .filter {
+                it.isInline &&
+                    it.contentId.isNotBlank() &&
+                    it.contentType.startsWith("image/", ignoreCase = true) &&
+                    it.size in 1..MAX_INLINE_IMAGE_BYTES
+            }
+            .take(5)
+
+        for (att in inlineImages) {
+            runCatching {
+                val downloaded = c.downloadAttachment(att.id)
+                val b64 = Base64.getEncoder().encodeToString(downloaded.bytes)
+                val dataUri = "data:${downloaded.contentType};base64,$b64"
+                val cidClean = att.contentId.trim().removePrefix("<").removeSuffix(">")
+                html = html.replace("cid:$cidClean", dataUri, ignoreCase = true)
+            }
+        }
+        return detail.copy(body = html)
+    }
+
     fun backToMailList() {
-        _state.update { it.copy(screen = Screen.MailList, selectedMessage = null, errorMessage = null) }
+        _state.update {
+            it.copy(
+                screen = Screen.MailList,
+                selectedMessage = null,
+                directorySuggestions = emptyList(),
+                errorMessage = null
+            )
+        }
     }
 
     fun toggleRead(detail: EmailDetail) {
@@ -306,7 +712,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         val newState = !detail.isRead
         viewModelScope.launch {
             try {
-                c.setRead(detail.id, detail.changeKey, newState)
+                c.setRead(listOf(detail.id to detail.changeKey), newState)
                 _state.update { st ->
                     st.copy(
                         selectedMessage = st.selectedMessage?.copy(isRead = newState),
@@ -322,16 +728,57 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun deleteMessage(detail: EmailDetail) {
+    fun moveMessage(detail: EmailDetail, targetFolder: MailFolder) {
         val c = client ?: return
-        val hardDelete = _state.value.currentFolder == MailFolderType.DELETED
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true) }
             try {
-                c.deleteMessage(detail.id, detail.changeKey, hardDelete)
+                c.moveMessages(listOf(detail.id to detail.changeKey), targetFolder.id)
+                val folders = c.getFolders()
                 _state.update { st ->
                     st.copy(
                         isLoading = false,
+                        folders = folders,
+                        screen = Screen.MailList,
+                        selectedMessage = null,
+                        messages = st.messages.filterNot { it.id == detail.id },
+                        toastMessage = "Перемещено в «${targetFolder.displayName}»"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось переместить письмо"
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleSpam(detail: EmailDetail) {
+        val inJunk = _state.value.currentFolder?.systemKind == SystemFolderKind.JUNK
+        val targetKind = if (inJunk) SystemFolderKind.INBOX else SystemFolderKind.JUNK
+        val target = _state.value.folders.firstOrNull { it.systemKind == targetKind }
+        if (target == null) {
+            _state.update { it.copy(toastMessage = "Целевая папка не найдена") }
+            return
+        }
+        moveMessage(detail, target)
+    }
+
+    fun deleteMessage(detail: EmailDetail) {
+        val c = client ?: return
+        val hardDelete = _state.value.currentFolder?.systemKind == SystemFolderKind.DELETED
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.deleteMessages(listOf(detail.id to detail.changeKey), hardDelete)
+                val folders = c.getFolders()
+                _state.update { st ->
+                    st.copy(
+                        isLoading = false,
+                        folders = folders,
                         screen = Screen.MailList,
                         selectedMessage = null,
                         messages = st.messages.filterNot { it.id == detail.id },
@@ -349,44 +796,292 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openCompose(replyTo: EmailDetail? = null, isForward: Boolean = false) {
-        _state.update { it.copy(screen = Screen.Compose(replyTo, isForward), errorMessage = null) }
+    // --- Compose & Directory Autocomplete ---
+
+    fun openCompose(
+        replyTo: EmailDetail? = null,
+        replyAll: Boolean = false,
+        isForward: Boolean = false,
+        draft: EmailDetail? = null,
+        prefillTo: String? = null
+    ) {
+        val effectiveReplyTo = if (prefillTo != null && replyTo == null && draft == null) {
+            EmailDetail(
+                id = "",
+                changeKey = "",
+                subject = "",
+                from = prefillTo,
+                fromEmail = prefillTo,
+                to = emptyList(),
+                cc = emptyList(),
+                receivedAt = "",
+                body = "",
+                isHtml = false,
+                isRead = true,
+                attachments = emptyList()
+            )
+        } else {
+            replyTo
+        }
+        val effectiveDraft = if (prefillTo != null && draft == null && replyTo == null) {
+            effectiveReplyTo?.copy(isDraft = true, to = listOf(prefillTo))
+        } else {
+            draft
+        }
+        _state.update {
+            it.copy(
+                directorySuggestions = emptyList(),
+                screen = Screen.Compose(
+                    replyTo = if (effectiveDraft != null) null else effectiveReplyTo,
+                    replyAll = replyAll,
+                    isForward = isForward,
+                    draft = effectiveDraft
+                ),
+                errorMessage = null
+            )
+        }
     }
 
-    fun sendEmail(toRaw: String, ccRaw: String, subject: String, body: String) {
+    fun searchDirectory(query: String) {
+        directoryJob?.cancel()
+        val token = query.substringAfterLast(',').substringAfterLast(';').trim()
+        if (token.length < 2) {
+            _state.update { it.copy(directorySuggestions = emptyList()) }
+            return
+        }
+        val c = client ?: return
+        directoryJob = viewModelScope.launch {
+            delay(300)
+            runCatching { c.resolveNames(token) }
+                .onSuccess { list -> _state.update { it.copy(directorySuggestions = list.take(6)) } }
+        }
+    }
+
+    fun clearDirectorySuggestions() {
+        _state.update { it.copy(directorySuggestions = emptyList()) }
+    }
+
+    fun saveOrSendEmail(
+        draftId: String?,
+        draftChangeKey: String?,
+        toRaw: String,
+        ccRaw: String,
+        bccRaw: String,
+        subject: String,
+        body: String,
+        importance: EmailImportance,
+        attachmentUris: List<Uri>,
+        context: Context,
+        send: Boolean
+    ) {
         val c = client ?: return
         val toList = splitEmails(toRaw)
         val ccList = splitEmails(ccRaw)
-        if (toList.isEmpty() || toList.any { '@' !in it }) {
+        val bccList = splitEmails(bccRaw)
+
+        if (send && (toList.isEmpty() || toList.any { '@' !in it })) {
             _state.update { it.copy(errorMessage = "Укажите корректный адрес получателя") }
             return
         }
+
         viewModelScope.launch {
             _state.update { it.copy(isSending = true, errorMessage = null) }
             try {
-                c.sendMessage(
+                val outgoing = readOutgoingAttachments(context, attachmentUris)
+                c.saveOrSendDraft(
+                    draftId = draftId?.takeIf { it.isNotBlank() },
+                    draftChangeKey = draftChangeKey,
                     to = toList,
                     cc = ccList,
+                    bcc = bccList,
                     subject = subject.ifBlank { "(Без темы)" },
-                    body = body
+                    body = body,
+                    importance = importance,
+                    newAttachments = outgoing,
+                    send = send
                 )
                 _state.update {
                     it.copy(
                         isSending = false,
+                        directorySuggestions = emptyList(),
                         screen = Screen.MailList,
-                        toastMessage = "Письмо отправлено"
+                        toastMessage = if (send) "Письмо отправлено" else "Черновик сохранён"
                     )
                 }
+                loadMessages(offset = 0, reset = true)
             } catch (e: Exception) {
                 _state.update {
                     it.copy(
                         isSending = false,
-                        errorMessage = e.message ?: "Не удалось отправить письмо"
+                        errorMessage = e.message ?: if (send) {
+                            "Не удалось отправить письмо"
+                        } else {
+                            "Не удалось сохранить черновик"
+                        }
                     )
                 }
             }
         }
     }
+
+    private suspend fun readOutgoingAttachments(
+        context: Context,
+        uris: List<Uri>
+    ): List<OutgoingAttachment> = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext emptyList()
+        val resolver = context.contentResolver
+        var totalSize = 0L
+        val result = mutableListOf<OutgoingAttachment>()
+        for (uri in uris) {
+            var name = "attachment"
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cur ->
+                if (cur.moveToFirst()) {
+                    val idx = cur.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) name = cur.getString(idx) ?: name
+                }
+            }
+            val safeName = sanitizeFilename(name)
+            val mime = resolver.getType(uri) ?: "application/octet-stream"
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: throw EwsException("Не удалось прочитать файл: $safeName")
+            if (bytes.size > MAX_SINGLE_UPLOAD_BYTES) {
+                throw EwsException("Файл $safeName превышает 20 МБ")
+            }
+            totalSize += bytes.size
+            if (totalSize > MAX_TOTAL_UPLOAD_BYTES) {
+                throw EwsException("Суммарный размер вложений превышает 25 МБ")
+            }
+            result += OutgoingAttachment(name = safeName, contentType = mime, bytes = bytes)
+        }
+        result
+    }
+
+    // --- Contacts & Calendar ---
+
+    fun openContacts() {
+        _state.update { it.copy(screen = Screen.Contacts, errorMessage = null, directorySuggestions = emptyList()) }
+        val c = client ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                val list = c.getContacts()
+                _state.update { it.copy(isLoading = false, contacts = list) }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось загрузить контакты"
+                    )
+                }
+            }
+        }
+    }
+
+    fun addContact(name: String, email: String) {
+        val c = client ?: return
+        if (name.isBlank() || '@' !in email) {
+            _state.update { it.copy(toastMessage = "Укажите имя и корректный email") }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.createContact(name, email)
+                val list = c.getContacts()
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        contacts = list,
+                        toastMessage = "Контакт добавлен"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось добавить контакт"
+                    )
+                }
+            }
+        }
+    }
+
+    fun openCalendar() {
+        _state.update { it.copy(screen = Screen.Calendar, errorMessage = null) }
+        val c = client ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                val now = Instant.now()
+                val start = DateTimeFormatter.ISO_INSTANT.format(now.minusSeconds(86400L))
+                val end = DateTimeFormatter.ISO_INSTANT.format(now.plusSeconds(30L * 86400L))
+                val events = c.getCalendarEvents(start, end)
+                _state.update { it.copy(isLoading = false, calendarEvents = events) }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось загрузить календарь"
+                    )
+                }
+            }
+        }
+    }
+
+    fun createCalendarEvent(
+        subject: String,
+        startIso: String,
+        endIso: String,
+        location: String,
+        body: String
+    ) {
+        val c = client ?: return
+        if (subject.isBlank()) {
+            _state.update { it.copy(toastMessage = "Укажите название события") }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.createCalendarEvent(subject, startIso, endIso, location, body)
+                _state.update { it.copy(toastMessage = "Событие добавлено") }
+                openCalendar()
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось создать событие"
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteCalendarEvent(event: CalendarEvent) {
+        val c = client ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.deleteMessages(listOf(event.id to event.changeKey), hardDelete = false)
+                _state.update { st ->
+                    st.copy(
+                        isLoading = false,
+                        calendarEvents = st.calendarEvents.filterNot { it.id == event.id },
+                        toastMessage = "Событие удалено"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        toastMessage = e.message ?: "Не удалось удалить событие"
+                    )
+                }
+            }
+        }
+    }
+
+    // --- Attachments & Updates & Auth ---
 
     fun downloadAndOpenAttachment(attachment: AttachmentInfo, context: Context) {
         val c = client ?: return
@@ -595,6 +1290,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val PAGE_SIZE = 25
+        private const val MAX_INLINE_IMAGE_BYTES = 512 * 1024L
+        private const val MAX_SINGLE_UPLOAD_BYTES = 20 * 1024 * 1024L
+        private const val MAX_TOTAL_UPLOAD_BYTES = 25 * 1024 * 1024L
         private val RU_LOCALE = Locale("ru")
         private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm", RU_LOCALE)
         private val DAY_MONTH_FMT = DateTimeFormatter.ofPattern("d MMM", RU_LOCALE)
@@ -605,6 +1303,16 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             raw.split(',', ';', ' ')
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
+
+        fun extractRawEmail(formatted: String): String {
+            val start = formatted.indexOf('<')
+            val end = formatted.indexOf('>')
+            return if (start in 0 until end) {
+                formatted.substring(start + 1, end).trim()
+            } else {
+                formatted.trim()
+            }
+        }
 
         fun sanitizeFilename(name: String): String {
             val cleaned = name

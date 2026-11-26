@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color as AndroidColor
-import android.net.Uri
 import android.text.Html
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -13,6 +12,7 @@ import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,14 +24,22 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
+import androidx.compose.material.icons.automirrored.filled.ReplyAll
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.MarkEmailUnread
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -57,19 +65,27 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import ru.nstu.mail.data.AttachmentInfo
 import ru.nstu.mail.data.EmailDetail
-import ru.nstu.mail.data.MailFolderType
+import ru.nstu.mail.data.EmailImportance
+import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.SystemFolderKind
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageDetailScreen(
     detail: EmailDetail,
-    currentFolder: MailFolderType,
+    folders: List<MailFolder>,
+    currentFolder: MailFolder?,
     isDownloadingAttachment: Boolean,
     toastMessage: String?,
     onBack: () -> Unit,
     onToggleRead: (EmailDetail) -> Unit,
+    onToggleFlag: (EmailDetail) -> Unit,
     onReply: (EmailDetail) -> Unit,
+    onReplyAll: (EmailDetail) -> Unit,
     onForward: (EmailDetail) -> Unit,
+    onEditDraft: (EmailDetail) -> Unit,
+    onMoveToFolder: (EmailDetail, MailFolder) -> Unit,
+    onToggleSpam: (EmailDetail) -> Unit,
     onDelete: (EmailDetail) -> Unit,
     onDownloadAttachment: (AttachmentInfo, Context) -> Unit,
     onClearToast: () -> Unit
@@ -79,11 +95,25 @@ fun MessageDetailScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showMovePicker by remember { mutableStateOf(false) }
+    var moreMenuExpanded by remember { mutableStateOf(false) }
 
     LaunchedEffect(toastMessage) {
         val msg = toastMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         onClearToast()
+    }
+
+    if (showMovePicker) {
+        FolderPickerDialog(
+            folders = folders,
+            excludeFolderId = currentFolder?.id,
+            onDismiss = { showMovePicker = false },
+            onSelect = { target ->
+                showMovePicker = false
+                onMoveToFolder(detail, target)
+            }
+        )
     }
 
     if (confirmDelete) {
@@ -92,7 +122,7 @@ fun MessageDetailScreen(
             title = { Text("Удалить письмо?") },
             text = {
                 Text(
-                    if (currentFolder == MailFolderType.DELETED) {
+                    if (currentFolder?.systemKind == SystemFolderKind.DELETED) {
                         "Письмо будет удалено безвозвратно."
                     } else {
                         "Письмо будет перемещено в папку «Удалённые»."
@@ -126,24 +156,78 @@ fun MessageDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { onToggleRead(detail) }) {
+                    if (detail.isDraft) {
+                        IconButton(onClick = { onEditDraft(detail) }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Редактировать черновик")
+                        }
+                    }
+                    IconButton(onClick = { onToggleFlag(detail) }) {
                         Icon(
-                            imageVector = if (detail.isRead) {
-                                Icons.Default.MarkEmailUnread
+                            imageVector = if (detail.isFlagged) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = "Флажок",
+                            tint = if (detail.isFlagged) {
+                                MaterialTheme.colorScheme.primary
                             } else {
-                                Icons.Default.MarkEmailRead
-                            },
-                            contentDescription = "Переключить статус прочтения"
+                                MaterialTheme.colorScheme.onSurface
+                            }
                         )
                     }
                     IconButton(onClick = { onReply(detail) }) {
                         Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Ответить")
                     }
-                    IconButton(onClick = { onForward(detail) }) {
-                        Icon(Icons.AutoMirrored.Filled.Forward, contentDescription = "Переслать")
+                    IconButton(onClick = { onReplyAll(detail) }) {
+                        Icon(Icons.AutoMirrored.Filled.ReplyAll, contentDescription = "Ответить всем")
                     }
-                    IconButton(onClick = { confirmDelete = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Удалить")
+                    IconButton(onClick = { showMovePicker = true }) {
+                        Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = "Переместить")
+                    }
+                    Box {
+                        IconButton(onClick = { moreMenuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Ещё")
+                        }
+                        DropdownMenu(
+                            expanded = moreMenuExpanded,
+                            onDismissRequest = { moreMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Переслать") },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Forward, null) },
+                                onClick = { moreMenuExpanded = false; onForward(detail) }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (detail.isRead) "Отметить непрочитанным"
+                                        else "Отметить прочитанным"
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (detail.isRead) Icons.Default.MarkEmailUnread
+                                        else Icons.Default.MarkEmailRead,
+                                        null
+                                    )
+                                },
+                                onClick = { moreMenuExpanded = false; onToggleRead(detail) }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (currentFolder?.systemKind == SystemFolderKind.JUNK) {
+                                            "Не спам (во Входящие)"
+                                        } else {
+                                            "В спам"
+                                        }
+                                    )
+                                },
+                                onClick = { moreMenuExpanded = false; onToggleSpam(detail) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Удалить") },
+                                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                onClick = { moreMenuExpanded = false; confirmDelete = true }
+                            )
+                        }
                     }
                 }
             )
@@ -159,6 +243,15 @@ fun MessageDetailScreen(
             }
 
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                if (detail.importance == EmailImportance.HIGH) {
+                    Text(
+                        text = "Высокая важность",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
                 Text(
                     text = detail.subject,
                     style = MaterialTheme.typography.titleLarge,
@@ -185,6 +278,13 @@ fun MessageDetailScreen(
                 if (detail.cc.isNotEmpty()) {
                     Text(
                         text = "Копия: ${detail.cc.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (detail.bcc.isNotEmpty()) {
+                    Text(
+                        text = "Скрытая копия: ${detail.bcc.joinToString(", ")}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -256,6 +356,7 @@ private fun SandboxedEmailWebView(
                     allowFileAccess = false
                     allowContentAccess = false
                     domStorageEnabled = false
+                    @Suppress("DEPRECATION")
                     databaseEnabled = false
                     @Suppress("DEPRECATION")
                     setGeolocationEnabled(false)

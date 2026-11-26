@@ -33,15 +33,17 @@ object EwsXml {
         return sb.toString()
     }
 
-    fun buildGetFoldersRequest(folders: List<MailFolderType>): String {
-        val ids = folders.joinToString("\n        ") {
-            """<t:DistinguishedFolderId Id="${escapeXml(it.ewsId)}"/>"""
+    // --- Folders ---
+
+    fun buildGetDistinguishedFoldersRequest(distinguishedIds: List<String>): String {
+        val ids = distinguishedIds.joinToString("\n        ") {
+            """<t:DistinguishedFolderId Id="${escapeXml(it)}"/>"""
         }
         return wrapSoap(
             """
             <m:GetFolder>
               <m:FolderShape>
-                <t:BaseShape>Default</t:BaseShape>
+                <t:BaseShape>IdOnly</t:BaseShape>
               </m:FolderShape>
               <m:FolderIds>
                 $ids
@@ -51,17 +53,283 @@ object EwsXml {
         )
     }
 
+    fun parseDistinguishedFolderIds(xml: String, requestedIds: List<String>): Map<String, String> {
+        val doc = parseDocument(xml)
+        val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
+        if (faults.length > 0) checkSoapErrors(doc)
+
+        val responses = doc.getElementsByTagNameNS(EWS_MESSAGES, "GetFolderResponseMessage")
+        val map = mutableMapOf<String, String>()
+        for (i in 0 until responses.length) {
+            val msgEl = responses.item(i) as? Element ?: continue
+            val key = requestedIds.getOrNull(i) ?: continue
+            if (!msgEl.getAttribute("ResponseClass").equals("Success", ignoreCase = true)) continue
+            val folderEl = msgEl.firstChildElement(EWS_TYPES, "Folder") ?: continue
+            val folderId = folderEl.firstChildElement(EWS_TYPES, "FolderId")?.getAttribute("Id")
+            if (!folderId.isNullOrBlank()) {
+                map[key] = folderId
+            }
+        }
+        return map
+    }
+
+    fun buildFindFoldersRequest(): String {
+        return wrapSoap(
+            """
+            <m:FindFolder Traversal="Deep">
+              <m:FolderShape>
+                <t:BaseShape>Default</t:BaseShape>
+                <t:AdditionalProperties>
+                  <t:FieldURI FieldURI="folder:ParentFolderId"/>
+                  <t:FieldURI FieldURI="folder:FolderClass"/>
+                  <t:FieldURI FieldURI="folder:ChildFolderCount"/>
+                </t:AdditionalProperties>
+              </m:FolderShape>
+              <m:ParentFolderIds>
+                <t:DistinguishedFolderId Id="msgfolderroot"/>
+              </m:ParentFolderIds>
+            </m:FindFolder>
+            """.trimIndent()
+        )
+    }
+
+    fun parseFindFoldersResponse(
+        xml: String,
+        rootFolderId: String?,
+        systemIdMap: Map<String, SystemFolderKind>
+    ): List<MailFolder> {
+        val doc = parseDocument(xml)
+        checkSoapErrors(doc)
+
+        val folderNodes = doc.getElementsByTagNameNS(EWS_TYPES, "Folder")
+        val rawList = mutableListOf<MailFolder>()
+        for (i in 0 until folderNodes.length) {
+            val el = folderNodes.item(i) as? Element ?: continue
+            val fidEl = el.firstChildElement(EWS_TYPES, "FolderId") ?: continue
+            val id = fidEl.getAttribute("Id")
+            if (id.isBlank()) continue
+            val changeKey = fidEl.getAttribute("ChangeKey")
+            val parentId = el.firstChildElement(EWS_TYPES, "ParentFolderId")
+                ?.getAttribute("Id").orEmpty()
+            val folderClass = el.firstChildText(EWS_TYPES, "FolderClass")
+            val kind = systemIdMap[id]
+
+            val isMailFolder = kind != null ||
+                folderClass.equals("IPF.Note", ignoreCase = true) ||
+                folderClass.startsWith("IPF.Note.", ignoreCase = true)
+            if (!isMailFolder) continue
+
+            val displayName = el.firstChildText(EWS_TYPES, "DisplayName")
+                .ifBlank { kind?.labelRu ?: "Папка" }
+            val total = el.firstChildText(EWS_TYPES, "TotalCount").toIntOrNull() ?: 0
+            val unread = el.firstChildText(EWS_TYPES, "UnreadCount").toIntOrNull() ?: 0
+            val childCount = el.firstChildText(EWS_TYPES, "ChildFolderCount").toIntOrNull() ?: 0
+
+            rawList += MailFolder(
+                id = id,
+                changeKey = changeKey,
+                parentId = parentId,
+                displayName = displayName,
+                totalCount = total,
+                unreadCount = unread,
+                childFolderCount = childCount,
+                depth = 0,
+                systemKind = kind
+            )
+        }
+
+        val byId = rawList.associateBy { it.id }
+        val topLevel = mutableListOf<MailFolder>()
+        val childrenByParent = mutableMapOf<String, MutableList<MailFolder>>()
+
+        for (folder in rawList) {
+            val hasParentInTree = folder.parentId.isNotBlank() &&
+                folder.parentId != rootFolderId &&
+                byId.containsKey(folder.parentId)
+            if (hasParentInTree) {
+                childrenByParent.getOrPut(folder.parentId) { mutableListOf() }.add(folder)
+            } else {
+                topLevel += folder
+            }
+        }
+
+        topLevel.sortWith(
+            compareBy<MailFolder>(
+                { it.systemKind?.sortOrder ?: Int.MAX_VALUE },
+                { it.displayName.lowercase() }
+            )
+        )
+
+        val ordered = mutableListOf<MailFolder>()
+        val visited = mutableSetOf<String>()
+
+        fun appendTree(node: MailFolder, depth: Int) {
+            if (!visited.add(node.id)) return
+            ordered += node.copy(depth = depth)
+            val children = childrenByParent[node.id]
+                ?.sortedWith(
+                    compareBy<MailFolder>(
+                        { it.systemKind?.sortOrder ?: Int.MAX_VALUE },
+                        { it.displayName.lowercase() }
+                    )
+                )
+                .orEmpty()
+            for (child in children) {
+                appendTree(child, depth + 1)
+            }
+        }
+
+        for (root in topLevel) {
+            appendTree(root, 0)
+        }
+        return ordered
+    }
+
+    fun buildCreateFolderRequest(displayName: String, parentFolderId: String?): String {
+        val parentXml = if (parentFolderId.isNullOrBlank()) {
+            """<t:DistinguishedFolderId Id="msgfolderroot"/>"""
+        } else {
+            """<t:FolderId Id="${escapeXml(parentFolderId)}"/>"""
+        }
+        return wrapSoap(
+            """
+            <m:CreateFolder>
+              <m:ParentFolderId>
+                $parentXml
+              </m:ParentFolderId>
+              <m:Folders>
+                <t:Folder>
+                  <t:FolderClass>IPF.Note</t:FolderClass>
+                  <t:DisplayName>${escapeXml(displayName.trim())}</t:DisplayName>
+                </t:Folder>
+              </m:Folders>
+            </m:CreateFolder>
+            """.trimIndent()
+        )
+    }
+
+    fun buildRenameFolderRequest(folderId: String, changeKey: String, newName: String): String {
+        val ckAttr = if (changeKey.isNotBlank()) """ ChangeKey="${escapeXml(changeKey)}"""" else ""
+        return wrapSoap(
+            """
+            <m:UpdateFolder>
+              <m:FolderChanges>
+                <t:FolderChange>
+                  <t:FolderId Id="${escapeXml(folderId)}"$ckAttr/>
+                  <t:Updates>
+                    <t:SetFolderField>
+                      <t:FieldURI FieldURI="folder:DisplayName"/>
+                      <t:Folder>
+                        <t:DisplayName>${escapeXml(newName.trim())}</t:DisplayName>
+                      </t:Folder>
+                    </t:SetFolderField>
+                  </t:Updates>
+                </t:FolderChange>
+              </m:FolderChanges>
+            </m:UpdateFolder>
+            """.trimIndent()
+        )
+    }
+
+    fun buildDeleteFolderRequest(folderId: String, changeKey: String): String {
+        val ckAttr = if (changeKey.isNotBlank()) """ ChangeKey="${escapeXml(changeKey)}"""" else ""
+        return wrapSoap(
+            """
+            <m:DeleteFolder DeleteType="MoveToDeletedItems">
+              <m:FolderIds>
+                <t:FolderId Id="${escapeXml(folderId)}"$ckAttr/>
+              </m:FolderIds>
+            </m:DeleteFolder>
+            """.trimIndent()
+        )
+    }
+
+    fun buildEmptyFolderRequest(folderId: String): String {
+        return wrapSoap(
+            """
+            <m:EmptyFolder DeleteType="HardDelete" DeleteSubFolders="false">
+              <m:FolderIds>
+                <t:FolderId Id="${escapeXml(folderId)}"/>
+              </m:FolderIds>
+            </m:EmptyFolder>
+            """.trimIndent()
+        )
+    }
+
+    fun buildMarkAllReadRequest(folderId: String): String {
+        return wrapSoap(
+            """
+            <m:MarkAllItemsAsRead>
+              <m:ReadFlag>true</m:ReadFlag>
+              <m:SuppressReadReceipts>true</m:SuppressReadReceipts>
+              <m:FolderIds>
+                <t:FolderId Id="${escapeXml(folderId)}"/>
+              </m:FolderIds>
+            </m:MarkAllItemsAsRead>
+            """.trimIndent()
+        )
+    }
+
+    // --- Messages ---
+
     fun buildFindItemsRequest(
-        folder: MailFolderType,
+        folderIds: List<String>,
         offset: Int,
         pageSize: Int,
-        query: String?
+        query: String? = null,
+        filter: MailFilter = MailFilter.ALL
     ): String {
-        val queryBlock = if (!query.isNullOrBlank()) {
-            "<m:QueryString>${escapeXml(query.trim())}</m:QueryString>"
-        } else {
-            ""
+        val parentIds = folderIds.joinToString("\n        ") {
+            """<t:FolderId Id="${escapeXml(it)}"/>"""
         }
+
+        val trimmedQuery = query?.trim().orEmpty()
+        val kqlFilterToken = when (filter) {
+            MailFilter.ALL -> ""
+            MailFilter.UNREAD -> "isread:false"
+            MailFilter.FLAGGED -> "isflagged:true"
+            MailFilter.ATTACHMENTS -> "hasattachments:true"
+        }
+
+        val restrictionBlock: String
+        val queryStringBlock: String
+        if (trimmedQuery.isNotEmpty()) {
+            val combinedKql = listOf(trimmedQuery, kqlFilterToken)
+                .filter { it.isNotBlank() }
+                .joinToString(" ")
+            restrictionBlock = ""
+            queryStringBlock = "<m:QueryString>${escapeXml(combinedKql)}</m:QueryString>"
+        } else {
+            queryStringBlock = ""
+            restrictionBlock = when (filter) {
+                MailFilter.ALL -> ""
+                MailFilter.UNREAD -> """
+                    <m:Restriction>
+                      <t:IsEqualTo>
+                        <t:FieldURI FieldURI="message:IsRead"/>
+                        <t:FieldURIOrConstant><t:Constant Value="false"/></t:FieldURIOrConstant>
+                      </t:IsEqualTo>
+                    </m:Restriction>
+                """.trimIndent()
+                MailFilter.FLAGGED -> """
+                    <m:Restriction>
+                      <t:IsEqualTo>
+                        <t:ExtendedFieldURI PropertyTag="0x1090" PropertyType="Integer"/>
+                        <t:FieldURIOrConstant><t:Constant Value="2"/></t:FieldURIOrConstant>
+                      </t:IsEqualTo>
+                    </m:Restriction>
+                """.trimIndent()
+                MailFilter.ATTACHMENTS -> """
+                    <m:Restriction>
+                      <t:IsEqualTo>
+                        <t:FieldURI FieldURI="item:HasAttachments"/>
+                        <t:FieldURIOrConstant><t:Constant Value="true"/></t:FieldURIOrConstant>
+                      </t:IsEqualTo>
+                    </m:Restriction>
+                """.trimIndent()
+            }
+        }
+
         return wrapSoap(
             """
             <m:FindItem Traversal="Shallow">
@@ -72,20 +340,23 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:DateTimeReceived"/>
                   <t:FieldURI FieldURI="item:HasAttachments"/>
                   <t:FieldURI FieldURI="item:Preview"/>
+                  <t:FieldURI FieldURI="item:Importance"/>
+                  <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
                 </t:AdditionalProperties>
               </m:ItemShape>
               <m:IndexedPageItemView MaxEntriesReturned="$pageSize" Offset="$offset" BasePoint="Beginning"/>
+              $restrictionBlock
               <m:SortOrder>
                 <t:FieldOrder Order="Descending">
                   <t:FieldURI FieldURI="item:DateTimeReceived"/>
                 </t:FieldOrder>
               </m:SortOrder>
               <m:ParentFolderIds>
-                <t:DistinguishedFolderId Id="${escapeXml(folder.ewsId)}"/>
+                $parentIds
               </m:ParentFolderIds>
-              $queryBlock
+              $queryStringBlock
             </m:FindItem>
             """.trimIndent()
         )
@@ -105,9 +376,13 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Body"/>
                   <t:FieldURI FieldURI="item:HasAttachments"/>
                   <t:FieldURI FieldURI="item:Attachments"/>
+                  <t:FieldURI FieldURI="item:Importance"/>
+                  <t:FieldURI FieldURI="item:Flag"/>
+                  <t:FieldURI FieldURI="item:IsDraft"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:ToRecipients"/>
                   <t:FieldURI FieldURI="message:CcRecipients"/>
+                  <t:FieldURI FieldURI="message:BccRecipients"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
                 </t:AdditionalProperties>
               </m:ItemShape>
@@ -131,35 +406,35 @@ object EwsXml {
         )
     }
 
-    fun buildSendEmailRequest(
+    fun buildCreateMessageRequest(
         to: List<String>,
         cc: List<String>,
+        bcc: List<String>,
         subject: String,
-        body: String
+        body: String,
+        importance: EmailImportance,
+        sendImmediately: Boolean
     ): String {
-        val toXml = to.joinToString("") {
-            "<t:Mailbox><t:EmailAddress>${escapeXml(it)}</t:EmailAddress></t:Mailbox>"
-        }
-        val ccBlock = if (cc.isNotEmpty()) {
-            val ccXml = cc.joinToString("") {
-                "<t:Mailbox><t:EmailAddress>${escapeXml(it)}</t:EmailAddress></t:Mailbox>"
-            }
-            "<t:CcRecipients>$ccXml</t:CcRecipients>"
-        } else {
-            ""
-        }
+        val disposition = if (sendImmediately) "SendAndSaveCopy" else "SaveOnly"
+        val targetFolder = if (sendImmediately) "sentitems" else "drafts"
+        val toBlock = recipientsBlock("ToRecipients", to)
+        val ccBlock = recipientsBlock("CcRecipients", cc)
+        val bccBlock = recipientsBlock("BccRecipients", bcc)
+
         return wrapSoap(
             """
-            <m:CreateItem MessageDisposition="SendAndSaveCopy">
+            <m:CreateItem MessageDisposition="$disposition">
               <m:SavedItemFolderId>
-                <t:DistinguishedFolderId Id="sentitems"/>
+                <t:DistinguishedFolderId Id="$targetFolder"/>
               </m:SavedItemFolderId>
               <m:Items>
                 <t:Message>
                   <t:Subject>${escapeXml(subject)}</t:Subject>
+                  <t:Importance>${escapeXml(importance.ewsValue)}</t:Importance>
                   <t:Body BodyType="Text">${escapeXml(body)}</t:Body>
-                  <t:ToRecipients>$toXml</t:ToRecipients>
+                  $toBlock
                   $ccBlock
+                  $bccBlock
                 </t:Message>
               </m:Items>
             </m:CreateItem>
@@ -167,8 +442,21 @@ object EwsXml {
         )
     }
 
-    fun buildSetReadRequest(itemId: String, changeKey: String, isRead: Boolean): String {
+    fun buildUpdateDraftRequest(
+        itemId: String,
+        changeKey: String,
+        to: List<String>,
+        cc: List<String>,
+        bcc: List<String>,
+        subject: String,
+        body: String,
+        importance: EmailImportance
+    ): String {
         val ckAttr = if (changeKey.isNotBlank()) """ ChangeKey="${escapeXml(changeKey)}"""" else ""
+        val toUpdate = recipientUpdateField("message:ToRecipients", "ToRecipients", to)
+        val ccUpdate = recipientUpdateField("message:CcRecipients", "CcRecipients", cc)
+        val bccUpdate = recipientUpdateField("message:BccRecipients", "BccRecipients", bcc)
+
         return wrapSoap(
             """
             <m:UpdateItem ConflictResolution="AlwaysOverwrite" MessageDisposition="SaveOnly">
@@ -177,11 +465,20 @@ object EwsXml {
                   <t:ItemId Id="${escapeXml(itemId)}"$ckAttr/>
                   <t:Updates>
                     <t:SetItemField>
-                      <t:FieldURI FieldURI="message:IsRead"/>
-                      <t:Message>
-                        <t:IsRead>$isRead</t:IsRead>
-                      </t:Message>
+                      <t:FieldURI FieldURI="item:Subject"/>
+                      <t:Message><t:Subject>${escapeXml(subject)}</t:Subject></t:Message>
                     </t:SetItemField>
+                    <t:SetItemField>
+                      <t:FieldURI FieldURI="item:Importance"/>
+                      <t:Message><t:Importance>${escapeXml(importance.ewsValue)}</t:Importance></t:Message>
+                    </t:SetItemField>
+                    <t:SetItemField>
+                      <t:FieldURI FieldURI="item:Body"/>
+                      <t:Message><t:Body BodyType="Text">${escapeXml(body)}</t:Body></t:Message>
+                    </t:SetItemField>
+                    $toUpdate
+                    $ccUpdate
+                    $bccUpdate
                   </t:Updates>
                 </t:ItemChange>
               </m:ItemChanges>
@@ -190,49 +487,370 @@ object EwsXml {
         )
     }
 
-    fun buildDeleteItemRequest(itemId: String, changeKey: String, hardDelete: Boolean): String {
-        val deleteType = if (hardDelete) "HardDelete" else "MoveToDeletedItems"
+    fun buildCreateAttachmentRequest(
+        parentItemId: String,
+        parentChangeKey: String,
+        attachments: List<OutgoingAttachment>
+    ): String {
+        val ckAttr = if (parentChangeKey.isNotBlank()) {
+            """ ChangeKey="${escapeXml(parentChangeKey)}""""
+        } else {
+            ""
+        }
+        val attXml = attachments.joinToString("\n        ") { att ->
+            val b64 = Base64.getEncoder().encodeToString(att.bytes)
+            """
+            <t:FileAttachment>
+              <t:Name>${escapeXml(att.name)}</t:Name>
+              <t:ContentType>${escapeXml(att.contentType)}</t:ContentType>
+              <t:Content>$b64</t:Content>
+            </t:FileAttachment>
+            """.trimIndent()
+        }
+        return wrapSoap(
+            """
+            <m:CreateAttachment>
+              <m:ParentItemId Id="${escapeXml(parentItemId)}"$ckAttr/>
+              <m:Attachments>
+                $attXml
+              </m:Attachments>
+            </m:CreateAttachment>
+            """.trimIndent()
+        )
+    }
+
+    fun buildSendItemRequest(itemId: String, changeKey: String): String {
         val ckAttr = if (changeKey.isNotBlank()) """ ChangeKey="${escapeXml(changeKey)}"""" else ""
+        return wrapSoap(
+            """
+            <m:SendItem SaveItemToFolder="true">
+              <m:ItemIds>
+                <t:ItemId Id="${escapeXml(itemId)}"$ckAttr/>
+              </m:ItemIds>
+              <m:SavedItemFolderId>
+                <t:DistinguishedFolderId Id="sentitems"/>
+              </m:SavedItemFolderId>
+            </m:SendItem>
+            """.trimIndent()
+        )
+    }
+
+    fun parseItemIdResponse(xml: String): Pair<String, String> {
+        val doc = parseDocument(xml)
+        checkSoapErrors(doc)
+        val el = doc.getElementsByTagNameNS(EWS_TYPES, "ItemId").item(0) as? Element
+            ?: throw EwsException("Не получен ItemId от сервера")
+        return el.getAttribute("Id") to el.getAttribute("ChangeKey")
+    }
+
+    fun parseAttachmentRootChangeKey(xml: String): String {
+        val doc = parseDocument(xml)
+        checkSoapErrors(doc)
+        val nodes = doc.getElementsByTagNameNS(EWS_TYPES, "AttachmentId")
+        for (i in nodes.length - 1 downTo 0) {
+            val el = nodes.item(i) as? Element ?: continue
+            val ck = el.getAttribute("RootItemChangeKey")
+            if (ck.isNotBlank()) return ck
+        }
+        return ""
+    }
+
+    fun buildSetReadRequest(items: List<Pair<String, String>>, isRead: Boolean): String {
+        val changes = items.joinToString("\n        ") { (id, ck) ->
+            val ckAttr = if (ck.isNotBlank()) """ ChangeKey="${escapeXml(ck)}"""" else ""
+            """
+            <t:ItemChange>
+              <t:ItemId Id="${escapeXml(id)}"$ckAttr/>
+              <t:Updates>
+                <t:SetItemField>
+                  <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:Message><t:IsRead>$isRead</t:IsRead></t:Message>
+                </t:SetItemField>
+              </t:Updates>
+            </t:ItemChange>
+            """.trimIndent()
+        }
+        return wrapSoap(
+            """
+            <m:UpdateItem ConflictResolution="AlwaysOverwrite" MessageDisposition="SaveOnly">
+              <m:ItemChanges>
+                $changes
+              </m:ItemChanges>
+            </m:UpdateItem>
+            """.trimIndent()
+        )
+    }
+
+    fun buildSetFlagRequest(items: List<Pair<String, String>>, flagged: Boolean): String {
+        val flagStatus = if (flagged) "Flagged" else "NotFlagged"
+        val changes = items.joinToString("\n        ") { (id, ck) ->
+            val ckAttr = if (ck.isNotBlank()) """ ChangeKey="${escapeXml(ck)}"""" else ""
+            """
+            <t:ItemChange>
+              <t:ItemId Id="${escapeXml(id)}"$ckAttr/>
+              <t:Updates>
+                <t:SetItemField>
+                  <t:FieldURI FieldURI="item:Flag"/>
+                  <t:Message>
+                    <t:Flag><t:FlagStatus>$flagStatus</t:FlagStatus></t:Flag>
+                  </t:Message>
+                </t:SetItemField>
+              </t:Updates>
+            </t:ItemChange>
+            """.trimIndent()
+        }
+        return wrapSoap(
+            """
+            <m:UpdateItem ConflictResolution="AlwaysOverwrite" MessageDisposition="SaveOnly">
+              <m:ItemChanges>
+                $changes
+              </m:ItemChanges>
+            </m:UpdateItem>
+            """.trimIndent()
+        )
+    }
+
+    fun buildDeleteItemsRequest(items: List<Pair<String, String>>, hardDelete: Boolean): String {
+        val deleteType = if (hardDelete) "HardDelete" else "MoveToDeletedItems"
+        val ids = items.joinToString("\n        ") { (id, ck) ->
+            val ckAttr = if (ck.isNotBlank()) """ ChangeKey="${escapeXml(ck)}"""" else ""
+            """<t:ItemId Id="${escapeXml(id)}"$ckAttr/>"""
+        }
         return wrapSoap(
             """
             <m:DeleteItem DeleteType="$deleteType">
               <m:ItemIds>
-                <t:ItemId Id="${escapeXml(itemId)}"$ckAttr/>
+                $ids
               </m:ItemIds>
             </m:DeleteItem>
             """.trimIndent()
         )
     }
 
-    fun parseFoldersResponse(xml: String, requested: List<MailFolderType>): List<FolderInfo> {
+    fun buildMoveItemsRequest(items: List<Pair<String, String>>, targetFolderId: String): String {
+        val ids = items.joinToString("\n        ") { (id, ck) ->
+            val ckAttr = if (ck.isNotBlank()) """ ChangeKey="${escapeXml(ck)}"""" else ""
+            """<t:ItemId Id="${escapeXml(id)}"$ckAttr/>"""
+        }
+        return wrapSoap(
+            """
+            <m:MoveItem>
+              <m:ToFolderId>
+                <t:FolderId Id="${escapeXml(targetFolderId)}"/>
+              </m:ToFolderId>
+              <m:ItemIds>
+                $ids
+              </m:ItemIds>
+            </m:MoveItem>
+            """.trimIndent()
+        )
+    }
+
+    // --- GAL / Contacts / Calendar ---
+
+    fun buildResolveNamesRequest(query: String): String {
+        return wrapSoap(
+            """
+            <m:ResolveNames ReturnFullContactData="true" SearchScope="ActiveDirectoryContacts">
+              <m:UnresolvedEntry>${escapeXml(query.trim())}</m:UnresolvedEntry>
+            </m:ResolveNames>
+            """.trimIndent()
+        )
+    }
+
+    fun parseResolveNamesResponse(xml: String): List<ContactEntry> {
+        val doc = parseDocument(xml)
+        val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
+        if (faults.length > 0) checkSoapErrors(doc)
+
+        val respMsg = doc.getElementsByTagNameNS(EWS_MESSAGES, "ResolveNamesResponseMessage")
+            .item(0) as? Element
+        if (respMsg != null && respMsg.getAttribute("ResponseClass").equals("Error", true)) {
+            val code = respMsg.firstChildText(EWS_MESSAGES, "ResponseCode")
+            if (code == "ErrorNameResolutionNoResults") return emptyList()
+            checkSoapErrors(doc)
+        }
+
+        val resolutions = doc.getElementsByTagNameNS(EWS_TYPES, "Resolution")
+        val list = mutableListOf<ContactEntry>()
+        for (i in 0 until resolutions.length) {
+            val res = resolutions.item(i) as? Element ?: continue
+            val mb = res.firstChildElement(EWS_TYPES, "Mailbox") ?: continue
+            val email = mb.firstChildText(EWS_TYPES, "EmailAddress")
+            val name = mb.firstChildText(EWS_TYPES, "Name").ifBlank { email }
+            if (email.isNotBlank()) {
+                list += ContactEntry(
+                    name = name,
+                    email = email,
+                    isFromDirectory = true
+                )
+            }
+        }
+        return list.distinctBy { it.email.lowercase() }
+    }
+
+    fun buildFindContactsRequest(): String {
+        return wrapSoap(
+            """
+            <m:FindItem Traversal="Shallow">
+              <m:ItemShape>
+                <t:BaseShape>IdOnly</t:BaseShape>
+                <t:AdditionalProperties>
+                  <t:FieldURI FieldURI="contacts:DisplayName"/>
+                  <t:FieldURI FieldURI="contacts:EmailAddresses"/>
+                </t:AdditionalProperties>
+              </m:ItemShape>
+              <m:IndexedPageItemView MaxEntriesReturned="200" Offset="0" BasePoint="Beginning"/>
+              <m:ParentFolderIds>
+                <t:DistinguishedFolderId Id="contacts"/>
+              </m:ParentFolderIds>
+            </m:FindItem>
+            """.trimIndent()
+        )
+    }
+
+    fun parseFindContactsResponse(xml: String): List<ContactEntry> {
         val doc = parseDocument(xml)
         checkSoapErrors(doc)
 
-        val folderNodes = doc.getElementsByTagNameNS(EWS_TYPES, "Folder")
-        val result = mutableListOf<FolderInfo>()
-        for (i in 0 until folderNodes.length) {
-            val el = folderNodes.item(i) as? Element ?: continue
-            val type = requested.getOrNull(i) ?: continue
-            val name = el.firstChildText(EWS_TYPES, "DisplayName").ifBlank { type.labelRu }
-            val total = el.firstChildText(EWS_TYPES, "TotalCount").toIntOrNull() ?: 0
-            val unread = el.firstChildText(EWS_TYPES, "UnreadCount").toIntOrNull() ?: 0
-            result += FolderInfo(
-                type = type,
-                displayName = name,
-                totalCount = total,
-                unreadCount = unread
+        val contacts = doc.getElementsByTagNameNS(EWS_TYPES, "Contact")
+        val list = mutableListOf<ContactEntry>()
+        for (i in 0 until contacts.length) {
+            val c = contacts.item(i) as? Element ?: continue
+            val idEl = c.firstChildElement(EWS_TYPES, "ItemId") ?: continue
+            val id = idEl.getAttribute("Id")
+            val ck = idEl.getAttribute("ChangeKey")
+            val name = c.firstChildText(EWS_TYPES, "DisplayName")
+            val entries = c.getElementsByTagNameNS(EWS_TYPES, "Entry")
+            val email = (0 until entries.length)
+                .mapNotNull { (entries.item(it) as? Element)?.textContent?.trim() }
+                .firstOrNull { it.contains('@') }
+                .orEmpty()
+            if (email.isNotBlank() || name.isNotBlank()) {
+                list += ContactEntry(
+                    id = id,
+                    changeKey = ck,
+                    name = name.ifBlank { email },
+                    email = email,
+                    isFromDirectory = false
+                )
+            }
+        }
+        return list.sortedBy { it.name.lowercase() }
+    }
+
+    fun buildCreateContactRequest(name: String, email: String): String {
+        return wrapSoap(
+            """
+            <m:CreateItem>
+              <m:SavedItemFolderId>
+                <t:DistinguishedFolderId Id="contacts"/>
+              </m:SavedItemFolderId>
+              <m:Items>
+                <t:Contact>
+                  <t:DisplayName>${escapeXml(name.trim())}</t:DisplayName>
+                  <t:GivenName>${escapeXml(name.trim())}</t:GivenName>
+                  <t:EmailAddresses>
+                    <t:Entry Key="EmailAddress1">${escapeXml(email.trim())}</t:Entry>
+                  </t:EmailAddresses>
+                </t:Contact>
+              </m:Items>
+            </m:CreateItem>
+            """.trimIndent()
+        )
+    }
+
+    fun buildFindCalendarEventsRequest(startIso: String, endIso: String): String {
+        return wrapSoap(
+            """
+            <m:FindItem Traversal="Shallow">
+              <m:ItemShape>
+                <t:BaseShape>IdOnly</t:BaseShape>
+                <t:AdditionalProperties>
+                  <t:FieldURI FieldURI="item:Subject"/>
+                  <t:FieldURI FieldURI="calendar:Start"/>
+                  <t:FieldURI FieldURI="calendar:End"/>
+                  <t:FieldURI FieldURI="calendar:Location"/>
+                  <t:FieldURI FieldURI="calendar:IsAllDayEvent"/>
+                </t:AdditionalProperties>
+              </m:ItemShape>
+              <m:CalendarView MaxEntriesReturned="100" StartDate="${escapeXml(startIso)}" EndDate="${escapeXml(endIso)}"/>
+              <m:ParentFolderIds>
+                <t:DistinguishedFolderId Id="calendar"/>
+              </m:ParentFolderIds>
+            </m:FindItem>
+            """.trimIndent()
+        )
+    }
+
+    fun parseCalendarEventsResponse(xml: String): List<CalendarEvent> {
+        val doc = parseDocument(xml)
+        checkSoapErrors(doc)
+
+        val items = doc.getElementsByTagNameNS(EWS_TYPES, "CalendarItem")
+        val list = mutableListOf<CalendarEvent>()
+        for (i in 0 until items.length) {
+            val ev = items.item(i) as? Element ?: continue
+            val idEl = ev.firstChildElement(EWS_TYPES, "ItemId") ?: continue
+            list += CalendarEvent(
+                id = idEl.getAttribute("Id"),
+                changeKey = idEl.getAttribute("ChangeKey"),
+                subject = ev.firstChildText(EWS_TYPES, "Subject").ifBlank { "(Без названия)" },
+                startIso = ev.firstChildText(EWS_TYPES, "Start"),
+                endIso = ev.firstChildText(EWS_TYPES, "End"),
+                location = ev.firstChildText(EWS_TYPES, "Location"),
+                isAllDay = ev.firstChildText(EWS_TYPES, "IsAllDayEvent").equals("true", true)
             )
         }
-        return result
+        return list.sortedBy { it.startIso }
     }
+
+    fun buildCreateCalendarEventRequest(
+        subject: String,
+        startIso: String,
+        endIso: String,
+        location: String,
+        body: String
+    ): String {
+        val locBlock = if (location.isNotBlank()) {
+            "<t:Location>${escapeXml(location.trim())}</t:Location>"
+        } else {
+            ""
+        }
+        return wrapSoap(
+            """
+            <m:CreateItem SendMeetingInvitations="SendToNone">
+              <m:SavedItemFolderId>
+                <t:DistinguishedFolderId Id="calendar"/>
+              </m:SavedItemFolderId>
+              <m:Items>
+                <t:CalendarItem>
+                  <t:Subject>${escapeXml(subject.trim())}</t:Subject>
+                  <t:Body BodyType="Text">${escapeXml(body)}</t:Body>
+                  <t:Start>${escapeXml(startIso)}</t:Start>
+                  <t:End>${escapeXml(endIso)}</t:End>
+                  $locBlock
+                </t:CalendarItem>
+              </m:Items>
+            </m:CreateItem>
+            """.trimIndent()
+        )
+    }
+
+    // --- Response Parsers (Messages / Attachments) ---
 
     fun parseFindItemsResponse(xml: String): Pair<List<EmailSummary>, Boolean> {
         val doc = parseDocument(xml)
         checkSoapErrors(doc)
 
-        val rootFolder = doc.getElementsByTagNameNS(EWS_MESSAGES, "RootFolder").item(0) as? Element
-        val includesLast = rootFolder?.getAttribute("IncludesLastItemInRange")
-            ?.equals("true", ignoreCase = true) ?: true
+        val rootFolders = doc.getElementsByTagNameNS(EWS_MESSAGES, "RootFolder")
+        var includesLast = true
+        for (i in 0 until rootFolders.length) {
+            val rf = rootFolders.item(i) as? Element ?: continue
+            if (rf.getAttribute("IncludesLastItemInRange").equals("false", ignoreCase = true)) {
+                includesLast = false
+            }
+        }
 
         val items = mutableListOf<EmailSummary>()
         val messages = doc.getElementsByTagNameNS(EWS_TYPES, "Message")
@@ -247,6 +865,10 @@ object EwsXml {
             val hasAtt = msg.firstChildText(EWS_TYPES, "HasAttachments")
                 .equals("true", ignoreCase = true)
             val preview = msg.firstChildText(EWS_TYPES, "Preview")
+            val importance = EmailImportance.fromEws(msg.firstChildText(EWS_TYPES, "Importance"))
+            val flagStatus = msg.firstChildElement(EWS_TYPES, "Flag")
+                ?.firstChildText(EWS_TYPES, "FlagStatus").orEmpty()
+            val isFlagged = flagStatus.equals("Flagged", ignoreCase = true)
 
             val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
                 ?.firstChildElement(EWS_TYPES, "Mailbox")
@@ -262,10 +884,17 @@ object EwsXml {
                 receivedAt = receivedAt,
                 isRead = isRead,
                 hasAttachments = hasAtt,
-                preview = preview
+                preview = preview,
+                isFlagged = isFlagged,
+                importance = importance
             )
         }
-        return items to includesLast
+        val sorted = if (rootFolders.length > 1) {
+            items.sortedByDescending { it.receivedAt }
+        } else {
+            items
+        }
+        return sorted to includesLast
     }
 
     fun parseGetItemResponse(xml: String): EmailDetail {
@@ -282,6 +911,11 @@ object EwsXml {
         val subject = msg.firstChildText(EWS_TYPES, "Subject").ifBlank { "(Без темы)" }
         val receivedAt = msg.firstChildText(EWS_TYPES, "DateTimeReceived")
         val isRead = msg.firstChildText(EWS_TYPES, "IsRead").equals("true", ignoreCase = true)
+        val isDraft = msg.firstChildText(EWS_TYPES, "IsDraft").equals("true", ignoreCase = true)
+        val importance = EmailImportance.fromEws(msg.firstChildText(EWS_TYPES, "Importance"))
+        val flagStatus = msg.firstChildElement(EWS_TYPES, "Flag")
+            ?.firstChildText(EWS_TYPES, "FlagStatus").orEmpty()
+        val isFlagged = flagStatus.equals("Flagged", ignoreCase = true)
 
         val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
             ?.firstChildElement(EWS_TYPES, "Mailbox")
@@ -290,6 +924,7 @@ object EwsXml {
 
         val to = parseRecipients(msg.firstChildElement(EWS_TYPES, "ToRecipients"))
         val cc = parseRecipients(msg.firstChildElement(EWS_TYPES, "CcRecipients"))
+        val bcc = parseRecipients(msg.firstChildElement(EWS_TYPES, "BccRecipients"))
 
         val bodyEl = msg.firstChildElement(EWS_TYPES, "Body")
         val bodyType = bodyEl?.getAttribute("BodyType").orEmpty()
@@ -310,12 +945,14 @@ object EwsXml {
                 val size = fa.firstChildText(EWS_TYPES, "Size").toLongOrNull() ?: 0L
                 val isInline = fa.firstChildText(EWS_TYPES, "IsInline")
                     .equals("true", ignoreCase = true)
+                val contentId = fa.firstChildText(EWS_TYPES, "ContentId")
                 attachments += AttachmentInfo(
                     id = attId,
                     name = name,
                     contentType = ctype,
                     size = size,
-                    isInline = isInline
+                    isInline = isInline,
+                    contentId = contentId
                 )
             }
         }
@@ -328,10 +965,14 @@ object EwsXml {
             fromEmail = fromEmail,
             to = to,
             cc = cc,
+            bcc = bcc,
             receivedAt = receivedAt,
             body = bodyText,
             isHtml = isHtml,
             isRead = isRead,
+            isFlagged = isFlagged,
+            importance = importance,
+            isDraft = isDraft,
             attachments = attachments
         )
     }
@@ -356,6 +997,32 @@ object EwsXml {
     fun parseSimpleSuccessResponse(xml: String) {
         val doc = parseDocument(xml)
         checkSoapErrors(doc)
+    }
+
+    private fun recipientsBlock(tagName: String, addresses: List<String>): String {
+        if (addresses.isEmpty()) return ""
+        val mb = addresses.joinToString("") {
+            "<t:Mailbox><t:EmailAddress>${escapeXml(it)}</t:EmailAddress></t:Mailbox>"
+        }
+        return "<t:$tagName>$mb</t:$tagName>"
+    }
+
+    private fun recipientUpdateField(fieldUri: String, tagName: String, addresses: List<String>): String {
+        return if (addresses.isEmpty()) {
+            """
+            <t:DeleteItemField>
+              <t:FieldURI FieldURI="$fieldUri"/>
+            </t:DeleteItemField>
+            """.trimIndent()
+        } else {
+            val block = recipientsBlock(tagName, addresses)
+            """
+            <t:SetItemField>
+              <t:FieldURI FieldURI="$fieldUri"/>
+              <t:Message>$block</t:Message>
+            </t:SetItemField>
+            """.trimIndent()
+        }
     }
 
     private fun parseRecipients(container: Element?): List<String> {

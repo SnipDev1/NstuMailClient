@@ -24,21 +24,79 @@ class EwsClient(private val credentials: Credentials) {
 
     private var fallbackTried = false
 
-    suspend fun getFolders(
-        folders: List<MailFolderType> = MailFolderType.entries
-    ): List<FolderInfo> = withContext(Dispatchers.IO) {
-        val xml = postSoapWithAuthFallback(EwsXml.buildGetFoldersRequest(folders))
-        EwsXml.parseFoldersResponse(xml, folders)
+    @Volatile
+    private var cachedRootFolderId: String? = null
+
+    @Volatile
+    private var cachedSystemIdMap: Map<String, SystemFolderKind> = emptyMap()
+
+    // --- Folders ---
+
+    suspend fun getFolders(): List<MailFolder> = withContext(Dispatchers.IO) {
+        if (cachedSystemIdMap.isEmpty()) {
+            val reqIds = listOf("msgfolderroot") + SystemFolderKind.entries.map { it.ewsId }
+            val distXml = postSoapWithAuthFallback(EwsXml.buildGetDistinguishedFoldersRequest(reqIds))
+            val idMap = EwsXml.parseDistinguishedFolderIds(distXml, reqIds)
+            cachedRootFolderId = idMap["msgfolderroot"]
+            val sysMap = mutableMapOf<String, SystemFolderKind>()
+            for (kind in SystemFolderKind.entries) {
+                idMap[kind.ewsId]?.let { realId -> sysMap[realId] = kind }
+            }
+            cachedSystemIdMap = sysMap
+        }
+
+        val findXml = postSoapWithAuthFallback(EwsXml.buildFindFoldersRequest())
+        EwsXml.parseFindFoldersResponse(findXml, cachedRootFolderId, cachedSystemIdMap)
     }
 
+    suspend fun createFolder(displayName: String, parentFolderId: String? = null) =
+        withContext(Dispatchers.IO) {
+            val xml = postSoapWithAuthFallback(
+                EwsXml.buildCreateFolderRequest(displayName, parentFolderId)
+            )
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun renameFolder(folderId: String, changeKey: String, newName: String) =
+        withContext(Dispatchers.IO) {
+            val xml = postSoapWithAuthFallback(
+                EwsXml.buildRenameFolderRequest(folderId, changeKey, newName)
+            )
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun deleteFolder(folderId: String, changeKey: String) =
+        withContext(Dispatchers.IO) {
+            val xml = postSoapWithAuthFallback(
+                EwsXml.buildDeleteFolderRequest(folderId, changeKey)
+            )
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun emptyFolder(folderId: String) =
+        withContext(Dispatchers.IO) {
+            val xml = postSoapWithAuthFallback(EwsXml.buildEmptyFolderRequest(folderId))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun markAllRead(folderId: String) =
+        withContext(Dispatchers.IO) {
+            val xml = postSoapWithAuthFallback(EwsXml.buildMarkAllReadRequest(folderId))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    // --- Messages ---
+
     suspend fun listMessages(
-        folder: MailFolderType,
+        folderIds: List<String>,
         offset: Int = 0,
         pageSize: Int = 25,
-        query: String? = null
+        query: String? = null,
+        filter: MailFilter = MailFilter.ALL
     ): Pair<List<EmailSummary>, Boolean> = withContext(Dispatchers.IO) {
+        if (folderIds.isEmpty()) return@withContext emptyList<EmailSummary>() to true
         val xml = postSoapWithAuthFallback(
-            EwsXml.buildFindItemsRequest(folder, offset, pageSize, query)
+            EwsXml.buildFindItemsRequest(folderIds, offset, pageSize, query, filter)
         )
         EwsXml.parseFindItemsResponse(xml)
     }
@@ -54,31 +112,148 @@ class EwsClient(private val credentials: Credentials) {
             EwsXml.parseGetAttachmentResponse(xml)
         }
 
-    suspend fun sendMessage(
+    suspend fun saveOrSendDraft(
+        draftId: String?,
+        draftChangeKey: String?,
         to: List<String>,
         cc: List<String>,
+        bcc: List<String>,
         subject: String,
-        body: String
-    ) = withContext(Dispatchers.IO) {
-        val xml = postSoapWithAuthFallback(EwsXml.buildSendEmailRequest(to, cc, subject, body))
+        body: String,
+        importance: EmailImportance,
+        newAttachments: List<OutgoingAttachment>,
+        send: Boolean
+    ): Pair<String, String> = withContext(Dispatchers.IO) {
+        if (send && draftId == null && newAttachments.isEmpty()) {
+            val xml = postSoapWithAuthFallback(
+                EwsXml.buildCreateMessageRequest(
+                    to = to,
+                    cc = cc,
+                    bcc = bcc,
+                    subject = subject,
+                    body = body,
+                    importance = importance,
+                    sendImmediately = true
+                )
+            )
+            EwsXml.parseSimpleSuccessResponse(xml)
+            return@withContext "" to ""
+        }
+
+        var (itemId, changeKey) = if (draftId == null) {
+            val createXml = postSoapWithAuthFallback(
+                EwsXml.buildCreateMessageRequest(
+                    to = to,
+                    cc = cc,
+                    bcc = bcc,
+                    subject = subject,
+                    body = body,
+                    importance = importance,
+                    sendImmediately = false
+                )
+            )
+            EwsXml.parseItemIdResponse(createXml)
+        } else {
+            val updateXml = postSoapWithAuthFallback(
+                EwsXml.buildUpdateDraftRequest(
+                    itemId = draftId,
+                    changeKey = draftChangeKey.orEmpty(),
+                    to = to,
+                    cc = cc,
+                    bcc = bcc,
+                    subject = subject,
+                    body = body,
+                    importance = importance
+                )
+            )
+            EwsXml.parseItemIdResponse(updateXml)
+        }
+
+        if (newAttachments.isNotEmpty()) {
+            val attXml = postSoapWithAuthFallback(
+                EwsXml.buildCreateAttachmentRequest(itemId, changeKey, newAttachments)
+            )
+            val newCk = EwsXml.parseAttachmentRootChangeKey(attXml)
+            if (newCk.isNotBlank()) changeKey = newCk
+        }
+
+        if (send) {
+            val sendXml = postSoapWithAuthFallback(EwsXml.buildSendItemRequest(itemId, changeKey))
+            EwsXml.parseSimpleSuccessResponse(sendXml)
+            return@withContext "" to ""
+        }
+
+        itemId to changeKey
+    }
+
+    suspend fun setRead(items: List<Pair<String, String>>, isRead: Boolean) =
+        withContext(Dispatchers.IO) {
+            if (items.isEmpty()) return@withContext
+            val xml = postSoapWithAuthFallback(EwsXml.buildSetReadRequest(items, isRead))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun setFlagged(items: List<Pair<String, String>>, flagged: Boolean) =
+        withContext(Dispatchers.IO) {
+            if (items.isEmpty()) return@withContext
+            val xml = postSoapWithAuthFallback(EwsXml.buildSetFlagRequest(items, flagged))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun moveMessages(items: List<Pair<String, String>>, targetFolderId: String) =
+        withContext(Dispatchers.IO) {
+            if (items.isEmpty()) return@withContext
+            val xml = postSoapWithAuthFallback(EwsXml.buildMoveItemsRequest(items, targetFolderId))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun deleteMessages(items: List<Pair<String, String>>, hardDelete: Boolean) =
+        withContext(Dispatchers.IO) {
+            if (items.isEmpty()) return@withContext
+            val xml = postSoapWithAuthFallback(EwsXml.buildDeleteItemsRequest(items, hardDelete))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    // --- GAL / Contacts / Calendar ---
+
+    suspend fun resolveNames(query: String): List<ContactEntry> = withContext(Dispatchers.IO) {
+        if (query.trim().length < 2) return@withContext emptyList()
+        val xml = postSoapWithAuthFallback(EwsXml.buildResolveNamesRequest(query))
+        EwsXml.parseResolveNamesResponse(xml)
+    }
+
+    suspend fun getContacts(): List<ContactEntry> = withContext(Dispatchers.IO) {
+        val xml = postSoapWithAuthFallback(EwsXml.buildFindContactsRequest())
+        EwsXml.parseFindContactsResponse(xml)
+    }
+
+    suspend fun createContact(name: String, email: String) = withContext(Dispatchers.IO) {
+        val xml = postSoapWithAuthFallback(EwsXml.buildCreateContactRequest(name, email))
         EwsXml.parseSimpleSuccessResponse(xml)
     }
 
-    suspend fun setRead(itemId: String, changeKey: String, isRead: Boolean) =
+    suspend fun getCalendarEvents(startIso: String, endIso: String): List<CalendarEvent> =
         withContext(Dispatchers.IO) {
             val xml = postSoapWithAuthFallback(
-                EwsXml.buildSetReadRequest(itemId, changeKey, isRead)
+                EwsXml.buildFindCalendarEventsRequest(startIso, endIso)
             )
-            EwsXml.parseSimpleSuccessResponse(xml)
+            EwsXml.parseCalendarEventsResponse(xml)
         }
 
-    suspend fun deleteMessage(itemId: String, changeKey: String, hardDelete: Boolean) =
-        withContext(Dispatchers.IO) {
-            val xml = postSoapWithAuthFallback(
-                EwsXml.buildDeleteItemRequest(itemId, changeKey, hardDelete)
-            )
-            EwsXml.parseSimpleSuccessResponse(xml)
-        }
+    suspend fun createCalendarEvent(
+        subject: String,
+        startIso: String,
+        endIso: String,
+        location: String,
+        body: String
+    ) = withContext(Dispatchers.IO) {
+        val xml = postSoapWithAuthFallback(
+            EwsXml.buildCreateCalendarEventRequest(subject, startIso, endIso, location, body)
+        )
+        EwsXml.parseSimpleSuccessResponse(xml)
+    }
+
+    // --- Transport ---
 
     private fun postSoapWithAuthFallback(soapBody: String): String {
         return try {

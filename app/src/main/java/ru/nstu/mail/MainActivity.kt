@@ -8,7 +8,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import ru.nstu.mail.ui.CalendarScreen
 import ru.nstu.mail.ui.ComposeScreen
+import ru.nstu.mail.ui.ContactsScreen
 import ru.nstu.mail.ui.LoginScreen
 import ru.nstu.mail.ui.MailListScreen
 import ru.nstu.mail.ui.MailViewModel
@@ -52,11 +54,26 @@ class MainActivity : ComponentActivity() {
                     Screen.MailList -> MailListScreen(
                         state = state,
                         onSelectFolder = vm::selectFolder,
+                        onSelectFilter = vm::setFilter,
                         onRefresh = vm::refresh,
                         onLoadMore = vm::loadMore,
                         onSearch = vm::search,
+                        onToggleSearchAllFolders = vm::setSearchAllFolders,
                         onOpenMessage = vm::openMessage,
+                        onToggleSelect = vm::toggleSelection,
+                        onClearSelection = vm::clearSelection,
+                        onToggleFlag = vm::toggleFlag,
+                        onBatchSetRead = vm::batchSetRead,
+                        onBatchMove = vm::batchMove,
+                        onBatchDelete = vm::batchDelete,
+                        onCreateFolder = vm::createFolder,
+                        onRenameFolder = vm::renameFolder,
+                        onDeleteFolder = vm::deleteFolder,
+                        onEmptyCurrentFolder = vm::emptyCurrentFolder,
+                        onMarkAllRead = vm::markAllReadInCurrentFolder,
                         onCompose = { vm.openCompose() },
+                        onOpenContacts = vm::openContacts,
+                        onOpenCalendar = vm::openCalendar,
                         onOpenOwa = vm::openOwaFromMailList,
                         onCheckUpdates = { vm.checkForUpdates(manual = true) },
                         onLogout = vm::logout,
@@ -68,13 +85,19 @@ class MainActivity : ComponentActivity() {
                         if (detail != null) {
                             MessageDetailScreen(
                                 detail = detail,
+                                folders = state.folders,
                                 currentFolder = state.currentFolder,
                                 isDownloadingAttachment = state.isDownloadingAttachment,
                                 toastMessage = state.toastMessage,
                                 onBack = vm::backToMailList,
                                 onToggleRead = vm::toggleRead,
-                                onReply = { vm.openCompose(replyTo = it, isForward = false) },
+                                onToggleFlag = vm::toggleFlagDetail,
+                                onReply = { vm.openCompose(replyTo = it) },
+                                onReplyAll = { vm.openCompose(replyTo = it, replyAll = true) },
                                 onForward = { vm.openCompose(replyTo = it, isForward = true) },
+                                onEditDraft = { vm.openCompose(draft = it) },
+                                onMoveToFolder = vm::moveMessage,
+                                onToggleSpam = vm::toggleSpam,
                                 onDelete = vm::deleteMessage,
                                 onDownloadAttachment = vm::downloadAndOpenAttachment,
                                 onClearToast = vm::clearToast
@@ -85,12 +108,41 @@ class MainActivity : ComponentActivity() {
                     }
 
                     is Screen.Compose -> ComposeScreen(
+                        currentUserEmail = state.credentials?.email.orEmpty(),
                         replyTo = screen.replyTo,
+                        replyAll = screen.replyAll,
                         isForward = screen.isForward,
+                        draft = screen.draft,
+                        directorySuggestions = state.directorySuggestions,
                         isSending = state.isSending,
                         errorMessage = state.errorMessage,
                         onBack = vm::backToMailList,
-                        onSend = vm::sendEmail
+                        onSearchDirectory = vm::searchDirectory,
+                        onClearSuggestions = vm::clearDirectorySuggestions,
+                        onSubmit = vm::saveOrSendEmail
+                    )
+
+                    Screen.Contacts -> ContactsScreen(
+                        contacts = state.contacts,
+                        directorySuggestions = state.directorySuggestions,
+                        isLoading = state.isLoading,
+                        toastMessage = state.toastMessage,
+                        onBack = vm::backToMailList,
+                        onSearchDirectory = vm::searchDirectory,
+                        onAddContact = vm::addContact,
+                        onComposeTo = { email -> vm.openCompose(prefillTo = email) },
+                        onClearToast = vm::clearToast
+                    )
+
+                    Screen.Calendar -> CalendarScreen(
+                        events = state.calendarEvents,
+                        isLoading = state.isLoading,
+                        toastMessage = state.toastMessage,
+                        onBack = vm::backToMailList,
+                        onRefresh = vm::openCalendar,
+                        onCreateEvent = vm::createCalendarEvent,
+                        onDeleteEvent = vm::deleteCalendarEvent,
+                        onClearToast = vm::clearToast
                     )
 
                     Screen.OwaWebView -> OwaWebViewScreen(

@@ -6,10 +6,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.EwsXml
-import ru.nstu.mail.data.MailFolderType
+import ru.nstu.mail.data.MailFilter
+import ru.nstu.mail.data.OutgoingAttachment
+import ru.nstu.mail.data.SystemFolderKind
 import java.util.Base64
 
 class EwsXmlTest {
@@ -21,38 +24,79 @@ class EwsXmlTest {
     }
 
     @Test
-    fun `parseFoldersResponse parses folder counts`() {
+    fun `parseFindFoldersResponse builds nested custom and system folder hierarchy`() {
         val xml = """
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
               <s:Body>
-                <m:GetFolderResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
-                                     xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                <m:FindFolderResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                      xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
                   <m:ResponseMessages>
-                    <m:GetFolderResponseMessage ResponseClass="Success">
-                      <m:ResponseCode>NoError</m:ResponseCode>
-                      <m:Folders>
-                        <t:Folder>
-                          <t:DisplayName>Входящие</t:DisplayName>
-                          <t:TotalCount>42</t:TotalCount>
-                          <t:UnreadCount>3</t:UnreadCount>
-                        </t:Folder>
-                      </m:Folders>
-                    </m:GetFolderResponseMessage>
+                    <m:FindFolderResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Folders>
+                          <t:Folder>
+                            <t:FolderId Id="f-cfg" ChangeKey="ck0"/>
+                            <t:ParentFolderId Id="root-1"/>
+                            <t:FolderClass>IPF.Configuration</t:FolderClass>
+                            <t:DisplayName>Conversation Action Settings</t:DisplayName>
+                          </t:Folder>
+                          <t:Folder>
+                            <t:FolderId Id="f-custom-sub" ChangeKey="ck3"/>
+                            <t:ParentFolderId Id="f-custom"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Лабы</t:DisplayName>
+                            <t:TotalCount>5</t:TotalCount>
+                            <t:UnreadCount>2</t:UnreadCount>
+                            <t:ChildFolderCount>0</t:ChildFolderCount>
+                          </t:Folder>
+                          <t:Folder>
+                            <t:FolderId Id="f-custom" ChangeKey="ck2"/>
+                            <t:ParentFolderId Id="root-1"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Учёба</t:DisplayName>
+                            <t:TotalCount>10</t:TotalCount>
+                            <t:UnreadCount>1</t:UnreadCount>
+                            <t:ChildFolderCount>1</t:ChildFolderCount>
+                          </t:Folder>
+                          <t:Folder>
+                            <t:FolderId Id="f-inbox" ChangeKey="ck1"/>
+                            <t:ParentFolderId Id="root-1"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Входящие</t:DisplayName>
+                            <t:TotalCount>42</t:TotalCount>
+                            <t:UnreadCount>3</t:UnreadCount>
+                            <t:ChildFolderCount>0</t:ChildFolderCount>
+                          </t:Folder>
+                        </t:Folders>
+                      </m:RootFolder>
+                    </m:FindFolderResponseMessage>
                   </m:ResponseMessages>
-                </m:GetFolderResponse>
+                </m:FindFolderResponse>
               </s:Body>
             </s:Envelope>
         """.trimIndent()
 
-        val folders = EwsXml.parseFoldersResponse(xml, listOf(MailFolderType.INBOX))
-        assertEquals(1, folders.size)
+        val folders = EwsXml.parseFindFoldersResponse(
+            xml = xml,
+            rootFolderId = "root-1",
+            systemIdMap = mapOf("f-inbox" to SystemFolderKind.INBOX)
+        )
+        assertEquals(3, folders.size)
         assertEquals("Входящие", folders[0].displayName)
-        assertEquals(42, folders[0].totalCount)
-        assertEquals(3, folders[0].unreadCount)
+        assertEquals(0, folders[0].depth)
+        assertTrue(folders[0].isSystem)
+
+        assertEquals("Учёба", folders[1].displayName)
+        assertEquals(0, folders[1].depth)
+        assertFalse(folders[1].isSystem)
+
+        assertEquals("Лабы", folders[2].displayName)
+        assertEquals(1, folders[2].depth)
+        assertFalse(folders[2].isSystem)
     }
 
     @Test
-    fun `parseFindItemsResponse parses list and pagination flag`() {
+    fun `parseFindItemsResponse parses flags importance and pagination`() {
         val xml = """
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
               <s:Body>
@@ -67,6 +111,8 @@ class EwsXmlTest {
                             <t:Subject>Расписание</t:Subject>
                             <t:DateTimeReceived>2026-11-26T08:00:00Z</t:DateTimeReceived>
                             <t:HasAttachments>true</t:HasAttachments>
+                            <t:Importance>High</t:Importance>
+                            <t:Flag><t:FlagStatus>Flagged</t:FlagStatus></t:Flag>
                             <t:Preview>Добрый день...</t:Preview>
                             <t:From>
                               <t:Mailbox>
@@ -90,13 +136,19 @@ class EwsXmlTest {
         assertEquals(1, items.size)
         assertEquals("id-1", items[0].id)
         assertEquals("Расписание", items[0].subject)
-        assertEquals("Деканат", items[0].senderName)
+        assertTrue(items[0].isFlagged)
+        assertEquals(EmailImportance.HIGH, items[0].importance)
         assertFalse(items[0].isRead)
         assertTrue(items[0].hasAttachments)
+
+        val unreadReq = EwsXml.buildFindItemsRequest(listOf("f-1"), 0, 25, null, MailFilter.UNREAD)
+        assertTrue(unreadReq.contains("""FieldURI="message:IsRead""""))
+        val flagReq = EwsXml.buildFindItemsRequest(listOf("f-1"), 0, 25, "лаб", MailFilter.FLAGGED)
+        assertTrue(flagReq.contains("лаб isflagged:true"))
     }
 
     @Test
-    fun `parseGetItemResponse and parseGetAttachmentResponse extract body and bytes`() {
+    fun `parseGetItemResponse and parseGetAttachmentResponse extract body cid and bytes`() {
         val itemXml = """
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
               <s:Body>
@@ -110,11 +162,14 @@ class EwsXmlTest {
                           <t:Subject>Тест</t:Subject>
                           <t:Body BodyType="HTML">&lt;p&gt;Привет&lt;/p&gt;</t:Body>
                           <t:DateTimeReceived>2026-11-26T08:10:00Z</t:DateTimeReceived>
+                          <t:Importance>High</t:Importance>
+                          <t:IsDraft>true</t:IsDraft>
                           <t:Attachments>
                             <t:FileAttachment>
                               <t:AttachmentId Id="att-9"/>
                               <t:Name>doc.pdf</t:Name>
                               <t:ContentType>application/pdf</t:ContentType>
+                              <t:ContentId>cid123</t:ContentId>
                               <t:Size>1024</t:Size>
                               <t:IsInline>false</t:IsInline>
                             </t:FileAttachment>
@@ -125,6 +180,11 @@ class EwsXmlTest {
                               <t:EmailAddress>student@stud.nstu.ru</t:EmailAddress>
                             </t:Mailbox>
                           </t:ToRecipients>
+                          <t:BccRecipients>
+                            <t:Mailbox>
+                              <t:EmailAddress>bcc@stud.nstu.ru</t:EmailAddress>
+                            </t:Mailbox>
+                          </t:BccRecipients>
                           <t:From>
                             <t:Mailbox>
                               <t:Name>Преподаватель</t:Name>
@@ -143,10 +203,10 @@ class EwsXmlTest {
 
         val detail = EwsXml.parseGetItemResponse(itemXml)
         assertTrue(detail.isHtml)
-        assertEquals("<p>Привет</p>", detail.body)
-        assertEquals(1, detail.attachments.size)
-        assertEquals("att-9", detail.attachments[0].id)
-        assertEquals("doc.pdf", detail.attachments[0].name)
+        assertTrue(detail.isDraft)
+        assertEquals(EmailImportance.HIGH, detail.importance)
+        assertEquals(listOf("bcc@stud.nstu.ru"), detail.bcc)
+        assertEquals("cid123", detail.attachments[0].contentId)
 
         val payload = "hello nstu".toByteArray()
         val b64 = Base64.getEncoder().encodeToString(payload)
@@ -174,6 +234,91 @@ class EwsXmlTest {
         val downloaded = EwsXml.parseGetAttachmentResponse(attXml)
         assertEquals("doc.pdf", downloaded.name)
         assertArrayEquals(payload, downloaded.bytes)
+    }
+
+    @Test
+    fun `parseResolveNamesResponse handles results and ErrorNameResolutionNoResults`() {
+        val noResXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:ResolveNamesResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+                  <m:ResponseMessages>
+                    <m:ResolveNamesResponseMessage ResponseClass="Error">
+                      <m:ResponseCode>ErrorNameResolutionNoResults</m:ResponseCode>
+                    </m:ResolveNamesResponseMessage>
+                  </m:ResponseMessages>
+                </m:ResolveNamesResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        assertTrue(EwsXml.parseResolveNamesResponse(noResXml).isEmpty())
+
+        val warnXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:ResolveNamesResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                        xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:ResolveNamesResponseMessage ResponseClass="Warning">
+                      <m:ResponseCode>ErrorNameResolutionMultipleResults</m:ResponseCode>
+                      <m:ResolutionSet>
+                        <t:Resolution>
+                          <t:Mailbox>
+                            <t:Name>Иван Иванов</t:Name>
+                            <t:EmailAddress>ivanov@corp.nstu.ru</t:EmailAddress>
+                          </t:Mailbox>
+                        </t:Resolution>
+                      </m:ResolutionSet>
+                    </m:ResolveNamesResponseMessage>
+                  </m:ResponseMessages>
+                </m:ResolveNamesResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val found = EwsXml.parseResolveNamesResponse(warnXml)
+        assertEquals(1, found.size)
+        assertEquals("ivanov@corp.nstu.ru", found[0].email)
+    }
+
+    @Test
+    fun `parseCalendarEventsResponse and parseFindContactsResponse parse items`() {
+        val calXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:CalendarItem>
+                            <t:ItemId Id="ev-1" ChangeKey="ck-1"/>
+                            <t:Subject>Лекция</t:Subject>
+                            <t:Start>2026-11-27T03:00:00Z</t:Start>
+                            <t:End>2026-11-27T04:30:00Z</t:End>
+                            <t:Location>1-205</t:Location>
+                            <t:IsAllDayEvent>false</t:IsAllDayEvent>
+                          </t:CalendarItem>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val events = EwsXml.parseCalendarEventsResponse(calXml)
+        assertEquals(1, events.size)
+        assertEquals("Лекция", events[0].subject)
+        assertEquals("1-205", events[0].location)
+
+        val attReq = EwsXml.buildCreateAttachmentRequest(
+            "item-1",
+            "ck-1",
+            listOf(OutgoingAttachment("note.txt", "text/plain", "hi".toByteArray()))
+        )
+        assertTrue(attReq.contains("<t:Name>note.txt</t:Name>"))
+        assertTrue(attReq.contains("<t:Content>aGk=</t:Content>"))
     }
 
     @Test
