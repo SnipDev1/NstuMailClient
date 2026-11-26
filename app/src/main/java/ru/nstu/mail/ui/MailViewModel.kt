@@ -52,8 +52,8 @@ import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UpdateChannel
+import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
-import ru.nstu.mail.data.matchAutoSortRuleDetailed
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.notify.MailNotificationHelper
@@ -328,11 +328,15 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateTagTemplate(oldPath: String, newPath: String) {
-        _tagTemplates.value = MailRulesStore.updateTagTemplate(getApplication(), oldPath, newPath)
+        val app = getApplication<Application>()
+        _tagTemplates.value = MailRulesStore.updateTagTemplate(app, oldPath, newPath)
+        _tagSortRules.value = MailRulesStore.getTagSortRules(app)
     }
 
     fun removeTagTemplate(path: String) {
-        _tagTemplates.value = MailRulesStore.removeTagTemplate(getApplication(), path)
+        val app = getApplication<Application>()
+        _tagTemplates.value = MailRulesStore.removeTagTemplate(app, path)
+        _tagSortRules.value = MailRulesStore.getTagSortRules(app)
     }
 
     fun saveTagSortRule(
@@ -680,7 +684,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 val folders = c.getFolders()
                 val fallback = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
                     ?: folders.firstOrNull()
-                val switched = _state.value.currentFolder?.id == folder.id
+                val curId = _state.value.currentFolder?.id
+                val switched = curId == folder.id || (curId != null && folders.none { it.id == curId })
                 _state.update {
                     it.copy(
                         isLoading = false,
@@ -952,38 +957,33 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         items: List<EmailSummary>,
         currentFolder: MailFolder?
     ) {
-        if (currentFolder?.systemKind != SystemFolderKind.INBOX) return
+        if (currentFolder?.systemKind != SystemFolderKind.INBOX || items.isEmpty()) return
         val rules = _tagSortRules.value
-        if (rules.isEmpty() || items.isEmpty()) return
         val inboxId = currentFolder.id
 
-        val pending = items.mapNotNull { item ->
-            val matched = matchAutoSortRuleDetailed(item.subject, rules) ?: return@mapNotNull null
-            if (matched.rule.targetFolderId.isBlank() || matched.rule.targetFolderId == inboxId) {
-                return@mapNotNull null
-            }
-            item to matched
-        }
+        val pending = items.filter { extractAllTagHierarchiesForMatching(it.subject).isNotEmpty() }
         if (pending.isEmpty()) return
 
         val app = getApplication<Application>()
         viewModelScope.launch {
-            val foldersCache = _state.value.folders.toMutableList()
+            var foldersCache: MutableList<MailFolder>? = _state.value.folders.toMutableList()
             val movedIds = mutableSetOf<String>()
             var folderListChanged = false
 
-            for ((item, matched) in pending) {
-                val (movedFolderId, refreshedFolders) = MailNotificationHelper.resolveAndMoveForTagRule(
+            for (item in pending) {
+                val (outcome, nextCache) = MailNotificationHelper.applyAutoSortForMessage(
                     context = app,
                     client = c,
                     msg = item,
-                    match = matched,
+                    rules = rules,
+                    inboxFolderId = inboxId,
                     foldersCache = foldersCache
                 )
-                if (refreshedFolders != null) {
+                foldersCache = nextCache
+                if (outcome.foldersChanged) {
                     folderListChanged = true
                 }
-                if (!movedFolderId.isNullOrBlank()) {
+                if (outcome.movedFromInbox) {
                     movedIds += item.id
                 }
             }

@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
@@ -116,21 +117,29 @@ fun SettingsScreen(
     var ignoringBatteryOpt by remember {
         mutableStateOf(MailNotificationHelper.isIgnoringBatteryOptimizations(context))
     }
-    var showAddRuleDialog by remember { mutableStateOf(false) }
+    var ruleTargetTag by remember { mutableStateOf<String?>(null) }
     var editingTemplateTarget by remember { mutableStateOf<Pair<String?, String>?>(null) }
     var pickingSwipeRight by remember { mutableStateOf<Boolean?>(null) }
 
-    if (showAddRuleDialog && folders.isNotEmpty()) {
-        AddTagRuleDialog(
-            folders = folders,
-            tagTemplates = tagTemplates,
-            fixedFolder = null,
-            onDismiss = { showAddRuleDialog = false },
-            onConfirm = { tag, folder, autoSub ->
-                showAddRuleDialog = false
-                onSaveTagSortRule(tag, folder, autoSub)
-            }
-        )
+    ruleTargetTag?.let { targetTag ->
+        if (folders.isNotEmpty()) {
+            AddTagRuleDialog(
+                folders = folders,
+                tagTemplates = tagTemplates,
+                rules = tagSortRules,
+                fixedFolder = null,
+                initialTag = targetTag,
+                onDismiss = { ruleTargetTag = null },
+                onConfirm = { tag, folder, autoSub ->
+                    ruleTargetTag = null
+                    onSaveTagSortRule(tag, folder, autoSub)
+                },
+                onRemoveRule = { tag ->
+                    ruleTargetTag = null
+                    onRemoveTagSortRule(tag)
+                }
+            )
+        }
     }
 
     editingTemplateTarget?.let { (oldPath, initialText) ->
@@ -513,14 +522,15 @@ fun SettingsScreen(
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
 
             Text(
-                text = "Шаблоны тегов",
+                text = "Шаблоны тегов и автосортировка",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = "Используйте «/» для вложенности (например 1/2 → [\"1\", \"2\"] в конце темы).",
+                text = "«/» — вложенность ([ \"1\", \"2\" ]), «;» в письме — несколько веток ([ \"1\"; \"Вопрос\" ]). " +
+                    "Нажмите на иконку папки у шаблона, чтобы настроить автосортировку; письма из НГТУ с неизвестным тегом уйдут в «Несортированные».",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -529,6 +539,18 @@ fun SettingsScreen(
                 val segs = parseTagPath(tpl)
                 val depth = (segs.size - 1).coerceAtLeast(0)
                 val preview = segs.joinToString(", ", "[", "]") { "\"$it\"" }
+                val directRule = tagSortRules.firstOrNull { it.tag.equals(tpl, ignoreCase = true) }
+                val inheritedRule = if (directRule == null) {
+                    tagSortRules
+                        .filter { rule ->
+                            rule.autoCreateSubfolders &&
+                                segs.size > rule.pathSegments().size &&
+                                tpl.startsWith("${rule.tag}/", ignoreCase = true)
+                        }
+                        .maxByOrNull { it.pathSegments().size }
+                } else {
+                    null
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -547,8 +569,46 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        when {
+                            directRule != null -> {
+                                val targetMuted = directRule.targetFolderId in mutedFolderIds
+                                Text(
+                                    text = buildString {
+                                        append("→ ${directRule.targetFolderName} · ")
+                                        append(if (directRule.autoCreateSubfolders) "с подпапками · " else "только папка · ")
+                                        append(if (targetMuted) "ув. выкл." else "ув. вкл.")
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            inheritedRule != null -> {
+                                Text(
+                                    text = "↳ через «${inheritedRule.tag}» → ${inheritedRule.targetFolderName}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (folders.isNotEmpty()) {
+                            IconButton(
+                                onClick = { ruleTargetTag = tpl },
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.DriveFileMove,
+                                    contentDescription = "Настроить автосортировку",
+                                    tint = if (directRule != null) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                         if (segs.size < 4) {
                             IconButton(
                                 onClick = { editingTemplateTarget = null to "$tpl/" },
@@ -572,66 +632,35 @@ fun SettingsScreen(
                     }
                 }
             }
-            Spacer(Modifier.height(6.dp))
-            OutlinedButton(onClick = { editingTemplateTarget = null to "" }) {
-                Text("+ Добавить шаблон")
+            val extraRules = tagSortRules.filter { rule ->
+                tagTemplates.none { it.equals(rule.tag, ignoreCase = true) }
             }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-
-            Text(
-                text = "Правила автосортировки",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(6.dp))
-            if (tagSortRules.isEmpty()) {
-                Text(
-                    text = "Правил автосортировки пока нет. Письма с тегом в конце темы (напр. [\"1\", \"2\"]) уходят в нужную папку и подпапки.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                tagSortRules.forEach { rule ->
-                    val targetMuted = rule.targetFolderId in mutedFolderIds
-                    val segPreview = rule.pathSegments().joinToString(", ", "[", "]") { "\"$it\"" }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+            extraRules.forEach { rule ->
+                val segPreview = rule.pathSegments().joinToString(", ", "[", "]") { "\"$it\"" }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "$segPreview → ${rule.targetFolderName}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    IconButton(
+                        onClick = { onRemoveTagSortRule(rule.tag) },
+                        modifier = Modifier.size(30.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "$segPreview → ${rule.targetFolderName}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = buildString {
-                                    append(if (rule.autoCreateSubfolders) "С подпапками · " else "Только папка · ")
-                                    append(if (targetMuted) "Уведомления выкл." else "Уведомления вкл.")
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        IconButton(
-                            onClick = { onRemoveTagSortRule(rule.tag) },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Удалить", modifier = Modifier.size(16.dp))
-                        }
+                        Icon(Icons.Default.Close, contentDescription = "Удалить правило", modifier = Modifier.size(16.dp))
                     }
                 }
             }
-            if (folders.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                OutlinedButton(onClick = { showAddRuleDialog = true }) {
-                    Text("+ Добавить правило")
-                }
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { editingTemplateTarget = null to "" }) {
+                Text("+ Добавить шаблон")
             }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))

@@ -176,7 +176,6 @@ class MainActivity : ComponentActivity() {
                             onOpenContacts = vm::openContacts,
                             onOpenCalendar = vm::openCalendar,
                             onOpenSettings = vm::openSettings,
-                            onCheckUpdates = { vm.checkForUpdates(manual = true) },
                             onLogout = vm::logout,
                             onClearToast = vm::clearToast
                         )

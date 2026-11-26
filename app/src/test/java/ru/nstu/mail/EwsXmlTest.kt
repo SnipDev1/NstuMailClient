@@ -21,12 +21,19 @@ import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.childTagsForPrefix
+import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.extractAllTagsForMatching
+import ru.nstu.mail.data.extractSubjectTagHierarchies
 import ru.nstu.mail.data.extractSubjectTags
+import ru.nstu.mail.data.formatSubjectWithTagHierarchies
 import ru.nstu.mail.data.formatSubjectWithTags
+import ru.nstu.mail.data.formatTagHierarchiesRaw
+import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.matchAutoSortRuleDetailed
 import ru.nstu.mail.data.participants
+import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.shouldNotifyForMessage
+import ru.nstu.mail.data.shouldRouteToUnsorted
 import ru.nstu.mail.data.sortTagTemplatesHierarchically
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.selectNewMessagesToNotify
@@ -812,5 +819,126 @@ class EwsXmlTest {
                 mutedSenders = emptySet()
             )
         )
+    }
+
+    @Test
+    fun `deleted subfolders are filtered out and hard delete empty copy xml builders work`() {
+        val xml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindFolderResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                      xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindFolderResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Folders>
+                          <t:Folder>
+                            <t:FolderId Id="f-deleted" ChangeKey="ck-d"/>
+                            <t:ParentFolderId Id="root-1"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Удалённые</t:DisplayName>
+                            <t:TotalCount>2</t:TotalCount>
+                            <t:UnreadCount>0</t:UnreadCount>
+                            <t:ChildFolderCount>1</t:ChildFolderCount>
+                          </t:Folder>
+                          <t:Folder>
+                            <t:FolderId Id="f-active" ChangeKey="ck-a"/>
+                            <t:ParentFolderId Id="root-1"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Активная</t:DisplayName>
+                          </t:Folder>
+                          <t:Folder>
+                            <t:FolderId Id="f-trashed-sub" ChangeKey="ck-t1"/>
+                            <t:ParentFolderId Id="f-deleted"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Старая подпапка</t:DisplayName>
+                          </t:Folder>
+                          <t:Folder>
+                            <t:FolderId Id="f-trashed-nested" ChangeKey="ck-t2"/>
+                            <t:ParentFolderId Id="f-trashed-sub"/>
+                            <t:FolderClass>IPF.Note</t:FolderClass>
+                            <t:DisplayName>Глубокая подпапка</t:DisplayName>
+                          </t:Folder>
+                        </t:Folders>
+                      </m:RootFolder>
+                    </m:FindFolderResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindFolderResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        val folders = EwsXml.parseFindFoldersResponse(
+            xml = xml,
+            rootFolderId = "root-1",
+            systemIdMap = mapOf("f-deleted" to SystemFolderKind.DELETED)
+        )
+        assertEquals(listOf("Удалённые", "Активная"), folders.map { it.displayName })
+
+        val hardDel = EwsXml.buildDeleteFolderRequest("f-1", "", hardDelete = true)
+        assertTrue(hardDel.contains("""<m:DeleteFolder DeleteType="HardDelete">"""))
+
+        val emptyReq = EwsXml.buildEmptyFolderRequest("f-deleted")
+        assertTrue(emptyReq.contains("""DeleteSubFolders="true""""))
+
+        val copyReq = EwsXml.buildCopyItemsRequest(listOf("item-1" to "ck-1"), "f-target")
+        assertTrue(copyReq.contains("<m:CopyItem>"))
+        assertTrue(copyReq.contains("""<t:FolderId Id="f-target"/>"""))
+    }
+
+    @Test
+    fun `multi-hierarchy semicolon tags, multi-folder rules, and unsorted nstu routing work`() {
+        val formatted = formatSubjectWithTagHierarchies(
+            "Важное объявление",
+            listOf(listOf("Информационное письмо"), listOf("Вопрос"))
+        )
+        assertEquals("""Важное объявление ["Информационное письмо"; "Вопрос"]""", formatted)
+
+        val formattedMixed = formatSubjectWithTagHierarchies(
+            "Отчёт",
+            listOf(listOf("1", "2"), listOf("Вопрос"))
+        )
+        assertEquals("""Отчёт ["1", "2"; "Вопрос"]""", formattedMixed)
+
+        val (hierarchies, clean) = extractSubjectTagHierarchies(formattedMixed)
+        assertEquals("Отчёт", clean)
+        assertEquals(listOf(listOf("1", "2"), listOf("Вопрос")), hierarchies)
+
+        val rawSaved = formatTagHierarchiesRaw(hierarchies)
+        assertEquals("1/2;Вопрос", rawSaved)
+        assertEquals(hierarchies, parseTagHierarchiesRaw(rawSaved))
+
+        assertEquals(
+            listOf(listOf("Информационное письмо"), listOf("Вопрос")),
+            extractAllTagHierarchiesForMatching(formatted)
+        )
+
+        val rules = listOf(
+            TagSortRule(tag = "1", targetFolderId = "f_1", targetFolderName = "Папка 1", autoCreateSubfolders = true),
+            TagSortRule(tag = "Вопрос", targetFolderId = "f_q", targetFolderName = "Вопросы", autoCreateSubfolders = false),
+            TagSortRule(tag = "Дубль", targetFolderId = "f_q", targetFolderName = "Вопросы", autoCreateSubfolders = false)
+        )
+
+        val multiMatches = matchAllAutoSortRules("""Задание ["1", "3"; "Вопрос"]""", rules)
+        assertEquals(2, multiMatches.size)
+        assertEquals("f_1", multiMatches[0].rule.targetFolderId)
+        assertEquals(listOf("3"), multiMatches[0].remainingSubtags)
+        assertEquals("f_q", multiMatches[1].rule.targetFolderId)
+        assertTrue(multiMatches[1].remainingSubtags.isEmpty())
+
+        // Duplicate target with identical effective destination is deduplicated
+        val dedupedMatches = matchAllAutoSortRules("""Тест ["Вопрос"; "Дубль"]""", rules)
+        assertEquals(1, dedupedMatches.size)
+
+        // Unmatched tagged NSTU sender -> goes to Unsorted
+        assertTrue(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "dean@corp.nstu.ru"))
+        assertTrue(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "user@nstu.ru"))
+        // Matched at least one rule -> NOT Unsorted
+        assertFalse(shouldRouteToUnsorted("""Письмо ["Вопрос"]""", 1, "dean@corp.nstu.ru"))
+        // External sender -> stays in Inbox (NOT Unsorted)
+        assertFalse(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "news@gmail.com"))
+        assertFalse(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "nstu.ru@gmail.com"))
+        // Untagged NSTU email -> stays in Inbox
+        assertFalse(shouldRouteToUnsorted("Обычное письмо", 0, "dean@corp.nstu.ru"))
     }
 }

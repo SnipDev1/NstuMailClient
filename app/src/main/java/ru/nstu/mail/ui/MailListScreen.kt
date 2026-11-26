@@ -38,6 +38,8 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Drafts
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.MarkEmailRead
@@ -54,7 +56,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
@@ -98,12 +99,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
-import ru.nstu.mail.BuildConfig
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.MailFilter
@@ -112,7 +115,9 @@ import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SwipeAction
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
-import ru.nstu.mail.data.extractSubjectTags
+import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.formatTagPath
+import ru.nstu.mail.data.parseTagPath
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -156,13 +161,13 @@ fun MailListScreen(
     onOpenContacts: () -> Unit,
     onOpenCalendar: () -> Unit,
     onOpenSettings: () -> Unit,
-    onCheckUpdates: () -> Unit,
     onLogout: () -> Unit,
     onClearToast: () -> Unit
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    var otherExpanded by rememberSaveable { mutableStateOf(false) }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var searchDraft by rememberSaveable { mutableStateOf(state.searchQuery) }
     var folderMenuExpanded by remember { mutableStateOf(false) }
@@ -217,11 +222,16 @@ fun MailListScreen(
         AddTagRuleDialog(
             folders = state.folders,
             tagTemplates = tagTemplates,
+            rules = tagSortRules,
             fixedFolder = targetFolder,
             onDismiss = { quickRuleFolder = null },
             onConfirm = { tag, chosen, autoSub ->
                 quickRuleFolder = null
                 onSaveTagSortRule(tag, chosen, autoSub)
+            },
+            onRemoveRule = { tag ->
+                quickRuleFolder = null
+                onRemoveTagSortRule(tag)
             }
         )
     }
@@ -350,7 +360,10 @@ fun MailListScreen(
                     HorizontalDivider()
                     Spacer(Modifier.height(6.dp))
 
-                    val systemFolders = state.folders.filter { it.isSystem }
+                    val deletedFolder = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }
+                    val systemFolders = state.folders.filter {
+                        it.isSystem && it.systemKind != SystemFolderKind.DELETED
+                    }
                     val customFolders = state.folders.filterNot { it.isSystem }
 
                     systemFolders.forEach { folder ->
@@ -451,26 +464,69 @@ fun MailListScreen(
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
                     NavigationDrawerItem(
-                        label = { Text("Контакты и адресная книга") },
+                        label = { Text("Прочее") },
                         selected = false,
-                        icon = { Icon(Icons.Default.People, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onOpenContacts()
+                        icon = {
+                            Icon(
+                                if (otherExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null
+                            )
                         },
+                        onClick = { otherExpanded = !otherExpanded },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
 
-                    NavigationDrawerItem(
-                        label = { Text("Календарь") },
-                        selected = false,
-                        icon = { Icon(Icons.Default.CalendarMonth, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onOpenCalendar()
-                        },
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
+                    if (otherExpanded) {
+                        Column(modifier = Modifier.padding(start = 12.dp)) {
+                            deletedFolder?.let { delFolder ->
+                                DrawerFolderItem(
+                                    folder = delFolder,
+                                    selected = state.currentFolder?.id == delFolder.id,
+                                    notificationsMuted = isFolderMuted(delFolder),
+                                    onSelect = {
+                                        scope.launch { drawerState.close() }
+                                        onSelectFolder(delFolder)
+                                    },
+                                    onToggleNotifications = {
+                                        scope.launch { drawerState.close() }
+                                        onToggleFolderNotifications(delFolder)
+                                    },
+                                    onSetupAutoSort = {
+                                        scope.launch { drawerState.close() }
+                                        quickRuleFolder = delFolder
+                                    },
+                                    onCreateSubfolder = {
+                                        scope.launch { drawerState.close() }
+                                        createFolderParent = true to delFolder
+                                    },
+                                    onRename = null,
+                                    onDelete = null
+                                )
+                            }
+
+                            NavigationDrawerItem(
+                                label = { Text("Контакты и адресная книга") },
+                                selected = false,
+                                icon = { Icon(Icons.Default.People, contentDescription = null) },
+                                onClick = {
+                                    scope.launch { drawerState.close() }
+                                    onOpenContacts()
+                                },
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Календарь") },
+                                selected = false,
+                                icon = { Icon(Icons.Default.CalendarMonth, contentDescription = null) },
+                                onClick = {
+                                    scope.launch { drawerState.close() }
+                                    onOpenCalendar()
+                                },
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+                        }
+                    }
 
                     NavigationDrawerItem(
                         label = { Text("Настройки") },
@@ -479,17 +535,6 @@ fun MailListScreen(
                         onClick = {
                             scope.launch { drawerState.close() }
                             onOpenSettings()
-                        },
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-
-                    NavigationDrawerItem(
-                        label = { Text("Проверить обновления (v${BuildConfig.VERSION_NAME})") },
-                        selected = false,
-                        icon = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onCheckUpdates()
                         },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
@@ -817,8 +862,27 @@ private fun DrawerFolderItem(
                             .size(14.dp)
                     )
                 }
-                if (folder.unreadCount > 0) {
-                    Text(folder.unreadCount.toString())
+                if (folder.totalCount > 0 || folder.unreadCount > 0) {
+                    val primaryColor = MaterialTheme.colorScheme.primary
+                    val normalColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    val dimColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                    Text(
+                        text = buildAnnotatedString {
+                            withStyle(
+                                SpanStyle(
+                                    color = if (folder.unreadCount > 0) primaryColor else normalColor,
+                                    fontWeight = if (folder.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                            ) {
+                                append(folder.unreadCount.toString())
+                            }
+                            withStyle(SpanStyle(color = dimColor)) {
+                                append("/${folder.totalCount}")
+                            }
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(end = 2.dp)
+                    )
                 }
                 Box {
                     IconButton(
@@ -1102,26 +1166,29 @@ private fun EmailRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    val (tags, cleanSubject) = remember(item.subject) {
-                        extractSubjectTags(item.subject)
+                    val (tagHierarchies, cleanSubject) = remember(item.subject) {
+                        extractSubjectTagHierarchies(item.subject)
                     }
-                    if (tags.isNotEmpty()) {
+                    if (tagHierarchies.isNotEmpty()) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
                                 .padding(bottom = 2.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.secondaryContainer,
-                                shape = RoundedCornerShape(6.dp)
-                            ) {
-                                Text(
-                                    text = tags.joinToString(" › "),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
-                                )
+                            tagHierarchies.forEach { hierarchy ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = hierarchy.joinToString(" › "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1254,17 +1321,23 @@ private fun TagSortRulesDialog(
     onRemoveRule: (tag: String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var showAdd by remember { mutableStateOf(false) }
+    var editTagTarget by remember { mutableStateOf<String?>(null) }
 
-    if (showAdd) {
+    editTagTarget?.let { initialTag ->
         AddTagRuleDialog(
             folders = folders,
             tagTemplates = tagTemplates,
+            rules = rules,
             fixedFolder = null,
-            onDismiss = { showAdd = false },
+            initialTag = initialTag.ifBlank { null },
+            onDismiss = { editTagTarget = null },
             onConfirm = { tag, folder, autoSub ->
-                showAdd = false
+                editTagTarget = null
                 onSaveRule(tag, folder, autoSub)
+            },
+            onRemoveRule = { tag ->
+                editTagTarget = null
+                onRemoveRule(tag)
             }
         )
     }
@@ -1276,44 +1349,54 @@ private fun TagSortRulesDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 360.dp)
+                    .heightIn(max = 380.dp)
                     .verticalScroll(rememberScrollState())
             ) {
-                if (rules.isEmpty()) {
-                    Text(
-                        text = "Правил пока нет. Письма с тегом (например [\"1\", \"2\"]) будут автоматически перемещаться в выбранную папку и её подпапки.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    rules.forEach { rule ->
-                        val muted = rule.targetFolderId in mutedFolderIds
-                        val segPreview = rule.pathSegments().joinToString(", ", "[", "]") { "\"$it\"" }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "$segPreview → ${rule.targetFolderName}",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = buildString {
-                                        append(if (rule.autoCreateSubfolders) "С подпапками · " else "Только папка · ")
-                                        append(if (muted) "Уведомления выкл." else "Уведомления вкл.")
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                Text(
+                    text = "Нажмите на любой шаблон тега, чтобы назначить папку. Неизвестные теги из НГТУ уходят в «Несортированные».",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                tagTemplates.forEach { tpl ->
+                    val segs = parseTagPath(tpl)
+                    val depth = (segs.size - 1).coerceAtLeast(0)
+                    val directRule = rules.firstOrNull { it.tag.equals(tpl, ignoreCase = true) }
+                    val muted = directRule?.targetFolderId in mutedFolderIds
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { editTagTarget = tpl }
+                            .padding(start = (depth * 12).dp, top = 6.dp, bottom = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (depth > 0) "↳ ${segs.last()}" else segs.lastOrNull().orEmpty(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (directRule != null) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                            Text(
+                                text = if (directRule != null) {
+                                    "→ ${directRule.targetFolderName}" +
+                                        (if (directRule.autoCreateSubfolders) " · подпапки" else "") +
+                                        (if (muted) " · ув. выкл." else "")
+                                } else {
+                                    "Без правила (нажмите для выбора папки)"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (directRule != null) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                        if (directRule != null) {
                             IconButton(
-                                onClick = { onRemoveRule(rule.tag) },
-                                modifier = Modifier.size(32.dp)
+                                onClick = { onRemoveRule(directRule.tag) },
+                                modifier = Modifier.size(28.dp)
                             ) {
                                 Icon(
                                     Icons.Default.Close,
@@ -1322,13 +1405,40 @@ private fun TagSortRulesDialog(
                                 )
                             }
                         }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                }
+                val extraRules = rules.filter { rule ->
+                    tagTemplates.none { it.equals(rule.tag, ignoreCase = true) }
+                }
+                extraRules.forEach { rule ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { editTagTarget = rule.tag }
+                            .padding(vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${rule.pathSegments().joinToString(" › ")} → ${rule.targetFolderName}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        IconButton(
+                            onClick = { onRemoveRule(rule.tag) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Удалить правило", modifier = Modifier.size(16.dp))
+                        }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = { showAdd = true }) { Text("+ Добавить") }
+            TextButton(onClick = { editTagTarget = "" }) { Text("+ Свой тег") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Закрыть") }
@@ -1340,25 +1450,38 @@ private fun TagSortRulesDialog(
 internal fun AddTagRuleDialog(
     folders: List<MailFolder>,
     tagTemplates: List<String>,
+    rules: List<TagSortRule> = emptyList(),
     fixedFolder: MailFolder?,
+    initialTag: String? = null,
     onDismiss: () -> Unit,
-    onConfirm: (tag: String, targetFolder: MailFolder, autoCreateSubfolders: Boolean) -> Unit
+    onConfirm: (tag: String, targetFolder: MailFolder, autoCreateSubfolders: Boolean) -> Unit,
+    onRemoveRule: ((tag: String) -> Unit)? = null
 ) {
     val allTags = remember(tagTemplates) {
         (ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES + tagTemplates)
-            .map { ru.nstu.mail.data.formatTagPath(ru.nstu.mail.data.parseTagPath(it)) }
+            .map { formatTagPath(parseTagPath(it)) }
             .filter { it.isNotEmpty() }
             .distinctBy { it.lowercase() }
     }
-    var tagText by remember { mutableStateOf(allTags.firstOrNull().orEmpty()) }
-    var autoCreateSubfolders by remember { mutableStateOf(true) }
-    var selectedFolder by remember {
+    val startingTag = initialTag?.takeIf { it.isNotBlank() } ?: allTags.firstOrNull().orEmpty()
+    val startingRule = remember(startingTag, rules) {
+        rules.firstOrNull { it.tag.equals(startingTag, ignoreCase = true) }
+    }
+    var tagText by remember(startingTag) { mutableStateOf(startingTag) }
+    var autoCreateSubfolders by remember(startingRule) {
+        mutableStateOf(startingRule?.autoCreateSubfolders ?: true)
+    }
+    var selectedFolder by remember(startingRule, fixedFolder, folders) {
         mutableStateOf(
             fixedFolder
+                ?: startingRule?.let { r -> folders.firstOrNull { it.id == r.targetFolderId } }
                 ?: folders.firstOrNull { !it.isSystem }
                 ?: folders.firstOrNull { it.systemKind != SystemFolderKind.INBOX }
                 ?: folders.firstOrNull()
         )
+    }
+    val currentRuleForTag = rules.firstOrNull {
+        it.tag.equals(formatTagPath(parseTagPath(tagText)), ignoreCase = true)
     }
 
     AlertDialog(
@@ -1366,36 +1489,75 @@ internal fun AddTagRuleDialog(
         title = {
             Text(
                 if (fixedFolder != null) "Автосортировка в «${fixedFolder.displayName}»"
-                else "Новое правило автосортировки"
+                else "Правило автосортировки"
             )
         },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 400.dp)
+                    .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState())
             ) {
                 OutlinedTextField(
                     value = tagText,
-                    onValueChange = { tagText = it.take(80) },
+                    onValueChange = { tagText = it.take(120) },
                     label = { Text("Тег или путь (напр. 1 или 1/2)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    allTags.forEach { t ->
-                        FilterChip(
-                            selected = tagText.equals(t, ignoreCase = true),
-                            onClick = { tagText = t },
-                            label = { Text(t.replace("/", " › ")) }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Из шаблонов тегов:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                allTags.forEach { tpl ->
+                    val segs = parseTagPath(tpl)
+                    val depth = (segs.size - 1).coerceAtLeast(0)
+                    val picked = tagText.equals(tpl, ignoreCase = true)
+                    val boundRule = rules.firstOrNull { it.tag.equals(tpl, ignoreCase = true) }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                tagText = tpl
+                                if (fixedFolder == null && boundRule != null) {
+                                    folders.firstOrNull { it.id == boundRule.targetFolderId }?.let {
+                                        selectedFolder = it
+                                    }
+                                    autoCreateSubfolders = boundRule.autoCreateSubfolders
+                                }
+                            }
+                            .padding(start = (4 + depth * 12).dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (picked) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(
+                            text = if (depth > 0) "↳ ${segs.last()}" else segs.lastOrNull().orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = if (picked) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
                         )
+                        if (boundRule != null) {
+                            Text(
+                                text = "→ ${boundRule.targetFolderName}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -1463,15 +1625,22 @@ internal fun AddTagRuleDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = {
-                    val target = fixedFolder ?: selectedFolder ?: return@TextButton
-                    onConfirm(tagText.trim(), target, autoCreateSubfolders)
-                },
-                enabled = ru.nstu.mail.data.parseTagPath(tagText).isNotEmpty() &&
-                    (fixedFolder != null || selectedFolder != null)
-            ) {
-                Text("Сохранить")
+            Row {
+                if (onRemoveRule != null && currentRuleForTag != null) {
+                    TextButton(onClick = { onRemoveRule(currentRuleForTag.tag) }) {
+                        Text("Сбросить", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                TextButton(
+                    onClick = {
+                        val target = fixedFolder ?: selectedFolder ?: return@TextButton
+                        onConfirm(tagText.trim(), target, autoCreateSubfolders)
+                    },
+                    enabled = parseTagPath(tagText).isNotEmpty() &&
+                        (fixedFolder != null || selectedFolder != null)
+                ) {
+                    Text("Сохранить")
+                }
             }
         },
         dismissButton = {

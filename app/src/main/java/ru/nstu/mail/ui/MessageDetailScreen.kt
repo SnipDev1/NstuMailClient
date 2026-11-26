@@ -97,7 +97,7 @@ import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
-import ru.nstu.mail.data.extractSubjectTags
+import ru.nstu.mail.data.extractSubjectTagHierarchies
 import ru.nstu.mail.data.participants
 import java.io.ByteArrayInputStream
 
@@ -358,10 +358,10 @@ fun MessageDetailScreen(
             }
 
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                val (subjectTags, cleanSubject) = remember(detail.subject) {
-                    extractSubjectTags(detail.subject)
+                val (subjectHierarchies, cleanSubject) = remember(detail.subject) {
+                    extractSubjectTagHierarchies(detail.subject)
                 }
-                if (subjectTags.isNotEmpty()) {
+                if (subjectHierarchies.isNotEmpty()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -369,16 +369,18 @@ fun MessageDetailScreen(
                             .padding(bottom = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text(
-                                text = subjectTags.joinToString(" › "),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                            )
+                        subjectHierarchies.forEach { hierarchy ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = hierarchy.joinToString(" › "),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
                         }
                     }
                 }

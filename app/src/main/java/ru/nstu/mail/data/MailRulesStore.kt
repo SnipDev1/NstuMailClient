@@ -29,15 +29,17 @@ enum class SwipeAction(val labelRu: String) {
 
 val DEFAULT_TAG_TEMPLATES = listOf("Учёба", "Учёба/ПЗ", "Учёба/Лаба", "Учёба/Лекция", "Важно")
 val DEFAULT_TAGS = DEFAULT_TAG_TEMPLATES
+const val UNSORTED_FOLDER_NAME = "Несортированные"
 
 private const val MAX_TAG_DEPTH = 4
-private const val MAX_TAG_LEN = 24
+private const val MAX_TAG_LEN = 36
+private const val MAX_TAG_HIERARCHIES = 6
 
 private val TRAILING_QUOTED_TAGS_REGEX = Regex(
-    """\s*\[\s*"[^"\[\]]{1,24}"(?:\s*,\s*"[^"\[\]]{1,24}")*\s*\]\s*$"""
+    """\s*\[\s*"[^"\[\];,]{1,36}"(?:\s*[,;]\s*"[^"\[\];,]{1,36}")*\s*\]\s*$"""
 )
-private val QUOTED_ITEM_REGEX = Regex(""""([^"\[\]]{1,24})"""")
-private val LEGACY_LEADING_TAG_REGEX = Regex("""^\s*\[([^\[\]]{1,24})]\s*""")
+private val QUOTED_ITEM_REGEX = Regex(""""([^"\[\];,]{1,36})"""")
+private val LEGACY_LEADING_TAG_REGEX = Regex("""^\s*\[([^\[\]]{1,36})]\s*""")
 private val HASH_TAG_REGEX = Regex("""(?:^|\s)#([\p{L}\p{N}_/-]{1,40})(?=\s|$|[.,!?;:])""")
 
 fun sanitizeTagSegment(raw: String): String =
@@ -45,6 +47,8 @@ fun sanitizeTagSegment(raw: String): String =
         .replace("\"", "")
         .replace("[", "")
         .replace("]", "")
+        .replace(";", "")
+        .replace(",", "")
         .replace("/", "")
         .replace("\\", "")
         .replace(":", "")
@@ -68,17 +72,40 @@ fun formatTagPath(segments: List<String>): String =
         .take(MAX_TAG_DEPTH)
         .joinToString("/")
 
-fun extractSubjectTags(subject: String): Pair<List<String>, String> {
+fun parseTagHierarchiesRaw(raw: String): List<List<String>> =
+    raw.split(';')
+        .map { parseTagPath(it) }
+        .filter { it.isNotEmpty() }
+        .distinctBy { formatTagPath(it).lowercase() }
+        .take(MAX_TAG_HIERARCHIES)
+
+fun formatTagHierarchiesRaw(hierarchies: List<List<String>>): String =
+    hierarchies.mapNotNull { segs ->
+        formatTagPath(segs).takeIf { it.isNotEmpty() }
+    }
+        .distinctBy { it.lowercase() }
+        .take(MAX_TAG_HIERARCHIES)
+        .joinToString(";")
+
+fun extractSubjectTagHierarchies(subject: String): Pair<List<List<String>>, String> {
     val trailingMatch = TRAILING_QUOTED_TAGS_REGEX.find(subject)
     if (trailingMatch != null) {
-        val segments = QUOTED_ITEM_REGEX.findAll(trailingMatch.value)
-            .map { sanitizeTagSegment(it.groupValues[1]) }
+        val rawValue = trailingMatch.value.trim()
+        val inner = rawValue.removePrefix("[").removeSuffix("]")
+        val hierarchies = inner.split(';')
+            .map { group ->
+                QUOTED_ITEM_REGEX.findAll(group)
+                    .map { sanitizeTagSegment(it.groupValues[1]) }
+                    .filter { it.isNotEmpty() }
+                    .take(MAX_TAG_DEPTH)
+                    .toList()
+            }
             .filter { it.isNotEmpty() }
-            .take(MAX_TAG_DEPTH)
-            .toList()
+            .distinctBy { formatTagPath(it).lowercase() }
+            .take(MAX_TAG_HIERARCHIES)
         val clean = subject.substring(0, trailingMatch.range.first).trim()
-        if (segments.isNotEmpty()) {
-            return segments to clean
+        if (hierarchies.isNotEmpty()) {
+            return hierarchies to clean
         }
     }
 
@@ -91,52 +118,114 @@ fun extractSubjectTags(subject: String): Pair<List<String>, String> {
         if (seg.isNotEmpty()) legacyTags += seg
         remaining = remaining.substring(m.range.last + 1)
     }
-    return legacyTags.take(MAX_TAG_DEPTH) to remaining.trim()
+    val trimmedLegacy = legacyTags.take(MAX_TAG_DEPTH)
+    return if (trimmedLegacy.isNotEmpty()) {
+        listOf(trimmedLegacy) to remaining.trim()
+    } else {
+        emptyList<List<String>>() to remaining.trim()
+    }
 }
 
-fun extractAllTagsForMatching(subject: String): List<String> {
-    val (primary, _) = extractSubjectTags(subject)
+fun extractSubjectTags(subject: String): Pair<List<String>, String> {
+    val (hierarchies, clean) = extractSubjectTagHierarchies(subject)
+    return hierarchies.firstOrNull().orEmpty() to clean
+}
+
+fun extractAllTagHierarchiesForMatching(subject: String): List<List<String>> {
+    val (primary, _) = extractSubjectTagHierarchies(subject)
     if (primary.isNotEmpty()) return primary
-    val hashMatch = HASH_TAG_REGEX.find(subject)?.groupValues?.getOrNull(1)
-    return if (!hashMatch.isNullOrBlank()) parseTagPath(hashMatch) else emptyList()
+    return HASH_TAG_REGEX.findAll(subject)
+        .map { parseTagPath(it.groupValues[1]) }
+        .filter { it.isNotEmpty() }
+        .distinctBy { formatTagPath(it).lowercase() }
+        .take(MAX_TAG_HIERARCHIES)
+        .toList()
 }
 
-fun formatSubjectWithTags(cleanSubject: String, tags: List<String>): String {
-    val (_, stripped) = extractSubjectTags(cleanSubject)
-    val cleanSegments = tags.map { sanitizeTagSegment(it) }
+fun extractAllTagsForMatching(subject: String): List<String> =
+    extractAllTagHierarchiesForMatching(subject).firstOrNull().orEmpty()
+
+fun formatSubjectWithTagHierarchies(
+    cleanSubject: String,
+    hierarchies: List<List<String>>
+): String {
+    val (_, stripped) = extractSubjectTagHierarchies(cleanSubject)
+    val cleanHierarchies = hierarchies
+        .map { path ->
+            path.map { sanitizeTagSegment(it) }
+                .filter { it.isNotEmpty() }
+                .take(MAX_TAG_DEPTH)
+        }
         .filter { it.isNotEmpty() }
-        .take(MAX_TAG_DEPTH)
-    if (cleanSegments.isEmpty()) return stripped.ifBlank { cleanSubject.trim() }
-    val suffix = cleanSegments.joinToString(", ", prefix = "[", postfix = "]") { "\"$it\"" }
+        .distinctBy { formatTagPath(it).lowercase() }
+        .take(MAX_TAG_HIERARCHIES)
+    if (cleanHierarchies.isEmpty()) return stripped.ifBlank { cleanSubject.trim() }
+    val suffix = cleanHierarchies.joinToString("; ", prefix = "[", postfix = "]") { path ->
+        path.joinToString(", ") { "\"$it\"" }
+    }
     return if (stripped.isEmpty()) suffix else "$stripped $suffix"
 }
 
-fun matchAutoSortRuleDetailed(subject: String, rules: List<TagSortRule>): TagMatchResult? {
-    if (rules.isEmpty() || subject.isBlank()) return null
-    val emailPath = extractAllTagsForMatching(subject)
-    if (emailPath.isEmpty()) return null
+fun formatSubjectWithTags(cleanSubject: String, tags: List<String>): String =
+    formatSubjectWithTagHierarchies(cleanSubject, if (tags.isEmpty()) emptyList() else listOf(tags))
 
-    var bestMatch: TagMatchResult? = null
-    var bestLen = -1
-    for (rule in rules) {
-        val rulePath = rule.pathSegments()
-        if (rulePath.isEmpty() || emailPath.size < rulePath.size) continue
-        val prefixMatches = rulePath.indices.all { idx ->
-            emailPath[idx].equals(rulePath[idx], ignoreCase = true)
+fun matchAllAutoSortRules(subject: String, rules: List<TagSortRule>): List<TagMatchResult> {
+    if (rules.isEmpty() || subject.isBlank()) return emptyList()
+    val hierarchies = extractAllTagHierarchiesForMatching(subject)
+    if (hierarchies.isEmpty()) return emptyList()
+
+    val results = mutableListOf<TagMatchResult>()
+    val seenTargets = mutableSetOf<Pair<String, List<String>>>()
+    for (emailPath in hierarchies) {
+        var bestMatch: TagMatchResult? = null
+        var bestLen = -1
+        for (rule in rules) {
+            val rulePath = rule.pathSegments()
+            if (rulePath.isEmpty() || emailPath.size < rulePath.size) continue
+            val prefixMatches = rulePath.indices.all { idx ->
+                emailPath[idx].equals(rulePath[idx], ignoreCase = true)
+            }
+            if (prefixMatches && rulePath.size > bestLen) {
+                bestLen = rulePath.size
+                bestMatch = TagMatchResult(
+                    rule = rule,
+                    remainingSubtags = emailPath.drop(rulePath.size)
+                )
+            }
         }
-        if (prefixMatches && rulePath.size > bestLen) {
-            bestLen = rulePath.size
-            bestMatch = TagMatchResult(
-                rule = rule,
-                remainingSubtags = emailPath.drop(rulePath.size)
-            )
+        if (bestMatch != null) {
+            val dedupeKey = bestMatch.rule.targetFolderId to if (bestMatch.rule.autoCreateSubfolders) {
+                bestMatch.remainingSubtags.map { it.lowercase() }
+            } else {
+                emptyList()
+            }
+            if (seenTargets.add(dedupeKey)) {
+                results += bestMatch
+            }
         }
     }
-    return bestMatch
+    return results
 }
 
+fun matchAutoSortRuleDetailed(subject: String, rules: List<TagSortRule>): TagMatchResult? =
+    matchAllAutoSortRules(subject, rules).firstOrNull()
+
 fun matchAutoSortRule(subject: String, rules: List<TagSortRule>): TagSortRule? =
-    matchAutoSortRuleDetailed(subject, rules)?.rule
+    matchAllAutoSortRules(subject, rules).firstOrNull()?.rule
+
+fun isNstuSender(senderEmail: String): Boolean {
+    val domain = senderEmail.trim().substringAfter('@', "").lowercase()
+    return domain == "nstu.ru" || domain.endsWith(".nstu.ru")
+}
+
+fun shouldRouteToUnsorted(
+    subject: String,
+    matchedRulesCount: Int,
+    senderEmail: String
+): Boolean =
+    matchedRulesCount == 0 &&
+        extractAllTagHierarchiesForMatching(subject).isNotEmpty() &&
+        isNstuSender(senderEmail)
 
 fun childTagsForPrefix(templates: List<String>, prefix: List<String>): List<String> {
     val result = mutableListOf<String>()
@@ -319,12 +408,23 @@ object MailRulesStore {
                 else -> tpl
             }
         }
+        val updatedRules = getTagSortRules(context).map { rule ->
+            when {
+                rule.tag.equals(normOld, ignoreCase = true) -> rule.copy(tag = normNew)
+                rule.tag.startsWith("$normOld/", ignoreCase = true) ->
+                    rule.copy(tag = normNew + rule.tag.substring(normOld.length))
+                else -> rule
+            }
+        }
+        saveTagSortRules(context, updatedRules)
         return saveTagTemplates(context, updated)
     }
 
     fun removeTagTemplate(context: Context, rawPath: String): List<String> {
         val norm = formatTagPath(parseTagPath(rawPath))
         val next = getTagTemplates(context).filterNot { it.equals(norm, ignoreCase = true) }
+        val nextRules = getTagSortRules(context).filterNot { it.tag.equals(norm, ignoreCase = true) }
+        saveTagSortRules(context, nextRules)
         return saveTagTemplates(context, next)
     }
 

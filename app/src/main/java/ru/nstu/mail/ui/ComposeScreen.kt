@@ -82,10 +82,12 @@ import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.childTagsForPrefix
-import ru.nstu.mail.data.extractSubjectTags
-import ru.nstu.mail.data.formatSubjectWithTags
+import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.formatSubjectWithTagHierarchies
+import ru.nstu.mail.data.formatTagHierarchiesRaw
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseFormattedRecipient
+import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.sanitizeTagSegment
 import java.util.concurrent.atomic.AtomicLong
@@ -231,18 +233,18 @@ fun ComposeScreen(
     val initialParsedSubject = remember(draft?.id, draft?.subject, replyTo?.id, isForward) {
         when {
             draft != null -> if (draft.subject == "(Без темы)") {
-                emptyList<String>() to ""
+                emptyList<List<String>>() to ""
             } else {
-                extractSubjectTags(draft.subject)
+                extractSubjectTagHierarchies(draft.subject)
             }
-            replyTo == null -> emptyList<String>() to ""
+            replyTo == null -> emptyList<List<String>>() to ""
             isForward -> {
                 val base = if (replyTo.subject.startsWith("Fwd:", ignoreCase = true)) {
                     replyTo.subject
                 } else {
                     "Fwd: ${replyTo.subject}"
                 }
-                emptyList<String>() to base
+                emptyList<List<String>>() to base
             }
             else -> {
                 val base = if (replyTo.subject.startsWith("Re:", ignoreCase = true)) {
@@ -250,15 +252,21 @@ fun ComposeScreen(
                 } else {
                     "Re: ${replyTo.subject}"
                 }
-                emptyList<String>() to base
+                emptyList<List<String>>() to base
             }
         }
     }
 
-    var selectedTagPathRaw by rememberSaveable {
-        mutableStateOf(formatTagPath(initialParsedSubject.first))
+    var savedHierarchiesRaw by rememberSaveable {
+        mutableStateOf(formatTagHierarchiesRaw(initialParsedSubject.first))
     }
-    val selectedTagPath = remember(selectedTagPathRaw) { parseTagPath(selectedTagPathRaw) }
+    var activePathRaw by rememberSaveable { mutableStateOf("") }
+    val savedHierarchies = remember(savedHierarchiesRaw) { parseTagHierarchiesRaw(savedHierarchiesRaw) }
+    val activePath = remember(activePathRaw) { parseTagPath(activePathRaw) }
+    val allHierarchies = remember(savedHierarchies, activePath) {
+        (savedHierarchies + listOfNotNull(activePath.takeIf { it.isNotEmpty() }))
+            .distinctBy { formatTagPath(it).lowercase() }
+    }
     var subject by rememberSaveable { mutableStateOf(initialParsedSubject.second) }
     var showAddTagDialog by remember { mutableStateOf(false) }
 
@@ -393,7 +401,7 @@ fun ComposeScreen(
 
     fun submitEmail(send: Boolean) {
         commitInlineEdit()
-        val finalSubject = formatSubjectWithTags(subject, selectedTagPath)
+        val finalSubject = formatSubjectWithTagHierarchies(subject, allHierarchies)
         onSubmit(
             draft?.id,
             draft?.changeKey,
@@ -415,8 +423,8 @@ fun ComposeScreen(
             onDismissRequest = { showAddTagDialog = false },
             title = {
                 Text(
-                    if (selectedTagPath.isEmpty()) "Добавить тег"
-                    else "Подтег для ${selectedTagPath.joinToString(" › ")}"
+                    if (activePath.isEmpty()) "Добавить тег"
+                    else "Подтег для ${activePath.joinToString(" › ")}"
                 )
             },
             text = {
@@ -425,7 +433,7 @@ fun ComposeScreen(
                     onValueChange = { newTagInput = it },
                     label = {
                         Text(
-                            if (selectedTagPath.isEmpty()) "Имя или путь (напр. 1 или 1/2)"
+                            if (activePath.isEmpty()) "Имя или путь (напр. 1 или 1/2)"
                             else "Имя подтега (напр. 2)"
                         )
                     },
@@ -438,14 +446,14 @@ fun ComposeScreen(
                     onClick = {
                         val addedSegs = parseTagPath(newTagInput)
                         if (addedSegs.isNotEmpty()) {
-                            val combined = if ('/' in newTagInput && selectedTagPath.isEmpty()) {
+                            val combined = if ('/' in newTagInput && activePath.isEmpty()) {
                                 addedSegs
                             } else {
-                                (selectedTagPath + addedSegs).take(4)
+                                (activePath + addedSegs).take(4)
                             }
                             val path = formatTagPath(combined)
                             onAddTagTemplate(path)
-                            selectedTagPathRaw = path
+                            activePathRaw = path
                         }
                         showAddTagDialog = false
                     },
@@ -703,7 +711,37 @@ fun ComposeScreen(
             )
             Spacer(Modifier.height(8.dp))
 
-            if (selectedTagPath.isNotEmpty()) {
+            if (savedHierarchies.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Ветки:", style = MaterialTheme.typography.labelMedium)
+                    savedHierarchies.forEachIndexed { idx, hierarchy ->
+                        InputChip(
+                            selected = true,
+                            onClick = {
+                                savedHierarchiesRaw = formatTagHierarchiesRaw(
+                                    savedHierarchies.filterIndexed { i, _ -> i != idx }
+                                )
+                            },
+                            label = { Text(hierarchy.joinToString(" › ")) },
+                            trailingIcon = {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Удалить ветку",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+
+            if (activePath.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -712,14 +750,18 @@ fun ComposeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Путь:", style = MaterialTheme.typography.labelMedium)
-                    selectedTagPath.forEachIndexed { idx, seg ->
+                    activePath.forEachIndexed { idx, seg ->
                         InputChip(
                             selected = true,
                             onClick = {
-                                selectedTagPathRaw = formatTagPath(selectedTagPath.take(idx + 1))
+                                activePathRaw = if (idx == activePath.lastIndex && idx == 0) {
+                                    ""
+                                } else {
+                                    formatTagPath(activePath.take(if (idx == activePath.lastIndex) idx else idx + 1))
+                                }
                             },
                             label = { Text(seg) },
-                            trailingIcon = if (idx == selectedTagPath.lastIndex) {
+                            trailingIcon = if (idx == activePath.lastIndex) {
                                 {
                                     Icon(
                                         Icons.Default.Close,
@@ -732,13 +774,20 @@ fun ComposeScreen(
                             }
                         )
                     }
-                    if (selectedTagPath.lastIndex >= 0) {
-                        TextButton(onClick = { selectedTagPathRaw = "" }) {
-                            Text("Сброс")
-                        }
+                    TextButton(onClick = {
+                        savedHierarchiesRaw = formatTagHierarchiesRaw(savedHierarchies + listOf(activePath))
+                        activePathRaw = ""
+                    }) {
+                        Text("+ Ещё ветка")
+                    }
+                    TextButton(onClick = { activePathRaw = "" }) {
+                        Text("Сброс")
                     }
                 }
-                val suffixPreview = selectedTagPath.joinToString(", ", "[", "]") { "\"$it\"" }
+            }
+
+            if (allHierarchies.isNotEmpty()) {
+                val suffixPreview = formatSubjectWithTagHierarchies("", allHierarchies)
                 Text(
                     text = "В конце темы: $suffixPreview",
                     style = MaterialTheme.typography.labelSmall,
@@ -747,10 +796,10 @@ fun ComposeScreen(
                 Spacer(Modifier.height(4.dp))
             }
 
-            val nextLevelTags = remember(tagTemplates, selectedTagPath) {
-                childTagsForPrefix(tagTemplates, selectedTagPath)
+            val nextLevelTags = remember(tagTemplates, activePath) {
+                childTagsForPrefix(tagTemplates, activePath)
             }
-            if (selectedTagPath.size < 4) {
+            if (activePath.size < 4) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -759,7 +808,7 @@ fun ComposeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (selectedTagPath.isEmpty()) "Теги:" else "Подтеги:",
+                        text = if (activePath.isEmpty()) "Теги:" else "Подтеги:",
                         style = MaterialTheme.typography.labelMedium
                     )
                     nextLevelTags.forEach { childSeg ->
@@ -768,7 +817,7 @@ fun ComposeScreen(
                             selected = false,
                             onClick = {
                                 if (nextSeg.isNotEmpty()) {
-                                    selectedTagPathRaw = formatTagPath(selectedTagPath + nextSeg)
+                                    activePathRaw = formatTagPath(activePath + nextSeg)
                                 }
                             },
                             label = { Text(childSeg) }
@@ -777,7 +826,7 @@ fun ComposeScreen(
                     AssistChip(
                         onClick = { showAddTagDialog = true },
                         label = {
-                            Text(if (selectedTagPath.isEmpty()) "+ Тег" else "+ Подтег")
+                            Text(if (activePath.isEmpty()) "+ Тег" else "+ Подтег")
                         }
                     )
                 }

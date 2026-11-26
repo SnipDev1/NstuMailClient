@@ -73,10 +73,19 @@ class EwsClient(private val credentials: Credentials) {
 
     suspend fun deleteFolder(folderId: String, changeKey: String) =
         withContext(Dispatchers.IO) {
-            val xml = postSoapWithAuthFallback(
-                EwsXml.buildDeleteFolderRequest(folderId, changeKey)
-            )
-            EwsXml.parseSimpleSuccessResponse(xml)
+            try {
+                val xml = postSoapWithAuthFallback(
+                    EwsXml.buildDeleteFolderRequest(folderId, changeKey, hardDelete = false)
+                )
+                EwsXml.parseSimpleSuccessResponse(xml)
+            } catch (e: EwsException) {
+                if (e.isAuthError) throw e
+                // Fall back to HardDelete if a same-named folder is already in Deleted Items or ChangeKey is stale
+                val xml = postSoapWithAuthFallback(
+                    EwsXml.buildDeleteFolderRequest(folderId, "", hardDelete = true)
+                )
+                EwsXml.parseSimpleSuccessResponse(xml)
+            }
         }
 
     suspend fun emptyFolder(folderId: String) =
@@ -215,6 +224,13 @@ class EwsClient(private val credentials: Credentials) {
         withContext(Dispatchers.IO) {
             if (items.isEmpty()) return@withContext
             val xml = postSoapWithAuthFallback(EwsXml.buildMoveItemsRequest(items, targetFolderId))
+            EwsXml.parseSimpleSuccessResponse(xml)
+        }
+
+    suspend fun copyMessages(items: List<Pair<String, String>>, targetFolderId: String) =
+        withContext(Dispatchers.IO) {
+            if (items.isEmpty()) return@withContext
+            val xml = postSoapWithAuthFallback(EwsXml.buildCopyItemsRequest(items, targetFolderId))
             EwsXml.parseSimpleSuccessResponse(xml)
         }
 

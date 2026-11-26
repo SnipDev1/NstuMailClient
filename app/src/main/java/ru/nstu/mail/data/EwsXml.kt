@@ -139,13 +139,30 @@ object EwsXml {
         }
 
         val byId = rawList.associateBy { it.id }
+        val deletedFolderId = systemIdMap.entries
+            .firstOrNull { it.value == SystemFolderKind.DELETED }
+            ?.key
+
+        fun isInsideDeletedItems(folder: MailFolder): Boolean {
+            if (deletedFolderId.isNullOrBlank() || folder.id == deletedFolderId) return false
+            val ancestors = mutableSetOf<String>()
+            var curParent = folder.parentId
+            while (curParent.isNotBlank() && ancestors.add(curParent)) {
+                if (curParent == deletedFolderId) return true
+                curParent = byId[curParent]?.parentId.orEmpty()
+            }
+            return false
+        }
+
+        val activeList = rawList.filterNot(::isInsideDeletedItems)
+        val activeById = activeList.associateBy { it.id }
         val topLevel = mutableListOf<MailFolder>()
         val childrenByParent = mutableMapOf<String, MutableList<MailFolder>>()
 
-        for (folder in rawList) {
+        for (folder in activeList) {
             val hasParentInTree = folder.parentId.isNotBlank() &&
                 folder.parentId != rootFolderId &&
-                byId.containsKey(folder.parentId)
+                activeById.containsKey(folder.parentId)
             if (hasParentInTree) {
                 childrenByParent.getOrPut(folder.parentId) { mutableListOf() }.add(folder)
             } else {
@@ -231,11 +248,16 @@ object EwsXml {
         )
     }
 
-    fun buildDeleteFolderRequest(folderId: String, changeKey: String): String {
+    fun buildDeleteFolderRequest(
+        folderId: String,
+        changeKey: String,
+        hardDelete: Boolean = false
+    ): String {
         val ckAttr = if (changeKey.isNotBlank()) """ ChangeKey="${escapeXml(changeKey)}"""" else ""
+        val deleteType = if (hardDelete) "HardDelete" else "MoveToDeletedItems"
         return wrapSoap(
             """
-            <m:DeleteFolder DeleteType="MoveToDeletedItems">
+            <m:DeleteFolder DeleteType="$deleteType">
               <m:FolderIds>
                 <t:FolderId Id="${escapeXml(folderId)}"$ckAttr/>
               </m:FolderIds>
@@ -247,7 +269,7 @@ object EwsXml {
     fun buildEmptyFolderRequest(folderId: String): String {
         return wrapSoap(
             """
-            <m:EmptyFolder DeleteType="HardDelete" DeleteSubFolders="false">
+            <m:EmptyFolder DeleteType="HardDelete" DeleteSubFolders="true">
               <m:FolderIds>
                 <t:FolderId Id="${escapeXml(folderId)}"/>
               </m:FolderIds>
@@ -679,6 +701,25 @@ object EwsXml {
                 $ids
               </m:ItemIds>
             </m:MoveItem>
+            """.trimIndent()
+        )
+    }
+
+    fun buildCopyItemsRequest(items: List<Pair<String, String>>, targetFolderId: String): String {
+        val ids = items.joinToString("\n        ") { (id, ck) ->
+            val ckAttr = if (ck.isNotBlank()) """ ChangeKey="${escapeXml(ck)}"""" else ""
+            """<t:ItemId Id="${escapeXml(id)}"$ckAttr/>"""
+        }
+        return wrapSoap(
+            """
+            <m:CopyItem>
+              <m:ToFolderId>
+                <t:FolderId Id="${escapeXml(targetFolderId)}"/>
+              </m:ToFolderId>
+              <m:ItemIds>
+                $ids
+              </m:ItemIds>
+            </m:CopyItem>
             """.trimIndent()
         )
     }
