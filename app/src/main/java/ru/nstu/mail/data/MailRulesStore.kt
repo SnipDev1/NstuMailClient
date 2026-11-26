@@ -213,10 +213,8 @@ fun matchAutoSortRuleDetailed(subject: String, rules: List<TagSortRule>): TagMat
 fun matchAutoSortRule(subject: String, rules: List<TagSortRule>): TagSortRule? =
     matchAllAutoSortRules(subject, rules).firstOrNull()?.rule
 
-fun isNstuSender(senderEmail: String): Boolean {
-    val domain = senderEmail.trim().substringAfter('@', "").lowercase()
-    return domain == "nstu.ru" || domain.endsWith(".nstu.ru")
-}
+fun isNstuSender(senderEmail: String): Boolean =
+    senderEmail.contains("nstu.ru", ignoreCase = true)
 
 fun shouldRouteToUnsorted(
     subject: String,

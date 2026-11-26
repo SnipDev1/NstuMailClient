@@ -366,6 +366,8 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
+                  <t:ExtendedFieldURI PropertyTag="0x5D02" PropertyType="String"/>
                 </t:AdditionalProperties>
               </m:ItemShape>
               <m:IndexedPageItemView MaxEntriesReturned="$pageSize" Offset="$offset" BasePoint="Beginning"/>
@@ -399,6 +401,8 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
+                  <t:ExtendedFieldURI PropertyTag="0x5D02" PropertyType="String"/>
                 </t:AdditionalProperties>
               </m:ItemShape>
               <m:IndexedPageItemView MaxEntriesReturned="$pageSize" Offset="0" BasePoint="Beginning"/>
@@ -1063,7 +1067,24 @@ object EwsXml {
             val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
                 ?.firstChildElement(EWS_TYPES, "Mailbox")
             val senderName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
-            val senderEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
+            var senderEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
+            if ('@' !in senderEmail) {
+                val extProps = msg.getElementsByTagNameNS(EWS_TYPES, "ExtendedProperty")
+                for (j in 0 until extProps.length) {
+                    val ep = extProps.item(j) as? Element ?: continue
+                    val tag = ep.firstChildElement(EWS_TYPES, "ExtendedFieldURI")
+                        ?.getAttribute("PropertyTag").orEmpty()
+                    if (tag.equals("0x5d01", ignoreCase = true) ||
+                        tag.equals("0x5d02", ignoreCase = true)
+                    ) {
+                        val candidate = ep.firstChildText(EWS_TYPES, "Value")
+                        if ('@' in candidate) {
+                            senderEmail = candidate
+                            break
+                        }
+                    }
+                }
+            }
 
             items += EmailSummary(
                 id = id,

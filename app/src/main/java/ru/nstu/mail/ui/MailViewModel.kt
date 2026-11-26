@@ -561,10 +561,54 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             try {
-                val folders = if (reset) ensureUnsortedFolder(c, c.getFolders()) else _state.value.folders
-                val updatedCurrent = _state.value.currentFolder?.let { cur ->
+                var folders = if (reset) ensureUnsortedFolder(c, c.getFolders()) else _state.value.folders
+                var updatedCurrent = _state.value.currentFolder?.let { cur ->
                     folders.firstOrNull { it.id == cur.id } ?: cur
                 } ?: folders.firstOrNull()
+                val inbox = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
+                if (reset &&
+                    query.isBlank() &&
+                    updatedCurrent != null &&
+                    !updatedCurrent.isSystem &&
+                    updatedCurrent.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true) &&
+                    inbox != null
+                ) {
+                    val (inboxItems, _) = runCatching {
+                        c.listMessages(
+                            folderIds = listOf(inbox.id),
+                            offset = 0,
+                            pageSize = PAGE_SIZE
+                        )
+                    }.getOrDefault(emptyList<EmailSummary>() to true)
+                    val taggedInbox = inboxItems.filter {
+                        extractAllTagHierarchiesForMatching(it.subject).isNotEmpty()
+                    }
+                    if (taggedInbox.isNotEmpty()) {
+                        var cache: MutableList<MailFolder>? = folders.toMutableList()
+                        var anyChanged = false
+                        val rules = _tagSortRules.value
+                        val app = getApplication<Application>()
+                        for (item in taggedInbox) {
+                            val (outcome, nextCache) = MailNotificationHelper.applyAutoSortForMessage(
+                                context = app,
+                                client = c,
+                                msg = item,
+                                rules = rules,
+                                inboxFolderId = inbox.id,
+                                foldersCache = cache
+                            )
+                            cache = nextCache
+                            if (outcome.movedFromInbox || outcome.foldersChanged) {
+                                anyChanged = true
+                            }
+                        }
+                        if (anyChanged) {
+                            folders = runCatching { c.getFolders() }.getOrDefault(folders)
+                            updatedCurrent = folders.firstOrNull { it.id == updatedCurrent.id } ?: updatedCurrent
+                            _mutedFolderIds.value = MailRulesStore.getMutedFolderIds(app)
+                        }
+                    }
+                }
 
                 val effectiveIds = if (folderIds.isEmpty() && updatedCurrent != null) {
                     listOf(updatedCurrent.id)
@@ -580,7 +624,6 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     filter = filter
                 )
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
-                val inbox = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX }
                 if (inbox != null) {
                     MailRulesStore.setInboxFolderId(getApplication(), inbox.id)
                 }

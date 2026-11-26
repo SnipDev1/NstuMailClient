@@ -50,6 +50,7 @@ import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.MailRulesStore
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
+import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.shouldNotifyForMessage
 import ru.nstu.mail.data.shouldRouteToUnsorted
@@ -473,7 +474,7 @@ object MailNotificationHelper {
             val keepInInbox = inboxFolderId != null && inboxFolderId in resolvedIds
             if (keepInInbox) {
                 for (fid in externalTargets) {
-                    runCatching { client.copyMessages(listOf(msg.id to msg.changeKey), fid) }
+                    runCatching { client.copyMessages(listOf(msg.id to ""), fid) }
                 }
                 return AutoSortOutcome(
                     movedFromInbox = false,
@@ -482,10 +483,10 @@ object MailNotificationHelper {
                 ) to cache
             } else {
                 for (extraId in externalTargets.drop(1)) {
-                    runCatching { client.copyMessages(listOf(msg.id to msg.changeKey), extraId) }
+                    runCatching { client.copyMessages(listOf(msg.id to ""), extraId) }
                 }
                 val moved = runCatching {
-                    client.moveMessages(listOf(msg.id to msg.changeKey), externalTargets.first())
+                    client.moveMessages(listOf(msg.id to ""), externalTargets.first())
                 }.isSuccess
                 return AutoSortOutcome(
                     movedFromInbox = moved,
@@ -495,34 +496,42 @@ object MailNotificationHelper {
             }
         }
 
-        if (shouldRouteToUnsorted(msg.subject, matchedRulesCount = 0, senderEmail = msg.senderEmail)) {
-            val workingFolders = ensureFoldersCache()
-            var unsorted = workingFolders?.firstOrNull {
-                !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+        if (extractAllTagHierarchiesForMatching(msg.subject).isNotEmpty()) {
+            var effectiveSenderEmail = msg.senderEmail
+            if ('@' !in effectiveSenderEmail) {
+                effectiveSenderEmail = runCatching { client.getMessage(msg.id).fromEmail }
+                    .getOrNull()
+                    .orEmpty()
             }
-            if (unsorted == null && workingFolders != null) {
-                val created = runCatching {
-                    client.createFolder(UNSORTED_FOLDER_NAME, parentFolderId = null)
-                    client.getFolders()
-                }.getOrNull()
-                if (created != null) {
-                    workingFolders.clear()
-                    workingFolders.addAll(created)
-                    foldersChanged = true
-                    unsorted = workingFolders.firstOrNull {
-                        !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+            if (shouldRouteToUnsorted(msg.subject, matchedRulesCount = 0, senderEmail = effectiveSenderEmail)) {
+                val workingFolders = ensureFoldersCache()
+                var unsorted = workingFolders?.firstOrNull {
+                    !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+                }
+                if (unsorted == null && workingFolders != null) {
+                    val created = runCatching {
+                        client.createFolder(UNSORTED_FOLDER_NAME, parentFolderId = null)
+                        client.getFolders()
+                    }.getOrNull()
+                    if (created != null) {
+                        workingFolders.clear()
+                        workingFolders.addAll(created)
+                        foldersChanged = true
+                        unsorted = workingFolders.firstOrNull {
+                            !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+                        }
                     }
                 }
-            }
-            if (unsorted != null && unsorted.id != inboxFolderId) {
-                val moved = runCatching {
-                    client.moveMessages(listOf(msg.id to msg.changeKey), unsorted.id)
-                }.isSuccess
-                return AutoSortOutcome(
-                    movedFromInbox = moved,
-                    targetFolderIds = if (moved) listOf(unsorted.id) else emptyList(),
-                    foldersChanged = foldersChanged
-                ) to cache
+                if (unsorted != null && unsorted.id != inboxFolderId) {
+                    val moved = runCatching {
+                        client.moveMessages(listOf(msg.id to ""), unsorted.id)
+                    }.isSuccess
+                    return AutoSortOutcome(
+                        movedFromInbox = moved,
+                        targetFolderIds = if (moved) listOf(unsorted.id) else emptyList(),
+                        foldersChanged = foldersChanged
+                    ) to cache
+                }
             }
         }
 

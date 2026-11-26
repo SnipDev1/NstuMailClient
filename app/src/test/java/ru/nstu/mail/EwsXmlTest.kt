@@ -930,15 +930,60 @@ class EwsXmlTest {
         val dedupedMatches = matchAllAutoSortRules("""Тест ["Вопрос"; "Дубль"]""", rules)
         assertEquals(1, dedupedMatches.size)
 
-        // Unmatched tagged NSTU sender -> goes to Unsorted
+        // Unmatched tagged NSTU sender (substring "nstu.ru") -> goes to Unsorted
         assertTrue(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "dean@corp.nstu.ru"))
         assertTrue(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "user@nstu.ru"))
+        assertTrue(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "s@nstu.ru.example.org"))
         // Matched at least one rule -> NOT Unsorted
         assertFalse(shouldRouteToUnsorted("""Письмо ["Вопрос"]""", 1, "dean@corp.nstu.ru"))
-        // External sender -> stays in Inbox (NOT Unsorted)
+        // External sender without nstu.ru -> stays in Inbox (NOT Unsorted)
         assertFalse(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "news@gmail.com"))
-        assertFalse(shouldRouteToUnsorted("""Письмо ["Неизвестный"]""", 0, "nstu.ru@gmail.com"))
         // Untagged NSTU email -> stays in Inbox
         assertFalse(shouldRouteToUnsorted("Обычное письмо", 0, "dean@corp.nstu.ru"))
+    }
+
+    @Test
+    fun `FindItem requests 0x5D01 and extracts SMTP fallback when Mailbox EmailAddress is missing or X500`() {
+        val findReq = EwsXml.buildFindItemsRequest(listOf("f-inbox"), 0, 25)
+        assertTrue(findReq.contains("""PropertyTag="0x5D01""""))
+        val unreadReq = EwsXml.buildFindInboxUnreadRequest(15)
+        assertTrue(unreadReq.contains("""PropertyTag="0x5D01""""))
+
+        val xml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="m-1" ChangeKey="ck-1"/>
+                            <t:Subject>Тест ["Б1"]</t:Subject>
+                            <t:DateTimeReceived>2026-11-26T15:36:00Z</t:DateTimeReceived>
+                            <t:ExtendedProperty>
+                              <t:ExtendedFieldURI PropertyTag="0x5d01" PropertyType="String"/>
+                              <t:Value>student@stud.nstu.ru</t:Value>
+                            </t:ExtendedProperty>
+                            <t:From>
+                              <t:Mailbox>
+                                <t:Name>Студент</t:Name>
+                              </t:Mailbox>
+                            </t:From>
+                            <t:IsRead>true</t:IsRead>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        val (items, _) = EwsXml.parseFindItemsResponse(xml)
+        assertEquals(1, items.size)
+        assertEquals("student@stud.nstu.ru", items[0].senderEmail)
     }
 }
