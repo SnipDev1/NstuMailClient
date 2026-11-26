@@ -16,7 +16,14 @@
   - Разрешён только HTTPS (`cleartextTrafficPermitted="false"`).
 - **Автообновления из GitHub Releases**:
   - При запуске (и вручную через боковое меню) приложение проверяет последний релиз репозитория `SnipDev1/NstuMailApk`.
-  - Для выпуска обновления создайте GitHub Release с тегом формата `v1.0.1` (выше `versionName` в `app/build.gradle.kts`) и прикрепите `.apk` (подписанный тем же ключом, что и установленная версия).
+  - Для выпуска новой версии используйте скрипт `./scripts/release.sh`:
+    ```bash
+    # Один раз положите GitHub PAT (Contents: Read & Write) в .release.env:
+    # GITHUB_TOKEN=ghp_...
+    ./scripts/release.sh 1.0.1 "Описание изменений"
+    ```
+    Скрипт при первом запуске создаст постоянный keystore (`~/.android/nstumail-release.jks`), поднимет `versionCode`/`versionName`, прогонит тесты, соберёт подписанный release APK, создаст тег `v1.0.1`, запушит всё в GitHub и опубликует Release с прикреплённым `.apk`.
+    Для тестовой локальной сборки без публикации: `./scripts/release.sh 1.0.1 --dry-run`.
 
 ## Сборка в Android Studio / Gradle
 1. Откройте папку проекта в **Android Studio** (требуется JDK 17 и Android SDK API 35) — Android Studio автоматически подтянет Gradle Wrapper 8.9.
