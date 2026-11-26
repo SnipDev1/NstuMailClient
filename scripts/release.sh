@@ -94,6 +94,14 @@ if [ "$DRY_RUN" -eq 0 ]; then
     echo "  export GITHUB_TOKEN=ghp_..." >&2
     echo "или запишите его в $RELEASE_ENV (файл добавлен в .gitignore)." >&2
     exit 1
+  else
+    if ! curl -fsS -o /dev/null \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $GITHUB_TOKEN" \
+      "https://api.github.com/user"; then
+      echo "Ошибка: GITHUB_TOKEN не принят GitHub API (истёк или неверный)." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -128,12 +136,35 @@ fi
 
 ORIG_GRADLE="$(cat "$GRADLE_FILE")"
 COMMITTED=0
+ASKPASS_FILE=""
 cleanup() {
+  if [ -n "$ASKPASS_FILE" ] && [ -f "$ASKPASS_FILE" ]; then
+    rm -f "$ASKPASS_FILE"
+  fi
   if [ "$COMMITTED" -eq 0 ]; then
     printf '%s' "$ORIG_GRADLE" > "$GRADLE_FILE"
   fi
 }
 trap cleanup EXIT
+
+git_push() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    if [ -z "$ASKPASS_FILE" ]; then
+      ASKPASS_FILE="$(mktemp)"
+      chmod 700 "$ASKPASS_FILE"
+      cat > "$ASKPASS_FILE" <<'ASKPASS_EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' "x-access-token" ;;
+  *) printf '%s\n' "$GITHUB_TOKEN" ;;
+esac
+ASKPASS_EOF
+    fi
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS_FILE" git push "$@"
+  else
+    git push "$@"
+  fi
+}
 
 python3 - "$GRADLE_FILE" "$VERSION" <<'PY'
 import re, sys
@@ -185,8 +216,8 @@ COMMITTED=1
 git tag -a "$TAG" -m "Release $TAG"
 
 echo "=== Отправка коммита и тега $TAG в origin ==="
-git push origin HEAD:main
-git push origin "$TAG"
+git_push origin HEAD:main
+git_push origin "$TAG"
 
 echo "=== Создание GitHub Release $TAG и загрузка APK ==="
 if [ "$USE_GH" -eq 1 ]; then
