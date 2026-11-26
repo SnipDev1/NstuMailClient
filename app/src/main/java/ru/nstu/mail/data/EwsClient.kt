@@ -224,6 +224,40 @@ class EwsClient(private val credentials: Credentials) {
         EwsXml.parseResolveNamesResponse(xml)
     }
 
+    suspend fun resolvePersonProfile(email: String, name: String = ""): PersonProfile? =
+        withContext(Dispatchers.IO) {
+            val cleanEmail = email.trim()
+            val cleanName = name.trim()
+
+            suspend fun queryProfiles(term: String): List<PersonProfile> {
+                if (term.length < 2) return emptyList()
+                val xml = postSoapWithAuthFallback(EwsXml.buildResolveNamesRequest(term))
+                return EwsXml.parsePersonProfilesFromResolveNames(xml)
+            }
+
+            if (cleanEmail.isNotBlank()) {
+                val byEmail = queryProfiles(cleanEmail)
+                val exact = byEmail.firstOrNull { p ->
+                    p.email.equals(cleanEmail, ignoreCase = true) ||
+                        p.aliases.any { it.equals(cleanEmail, ignoreCase = true) }
+                }
+                if (exact != null) return@withContext exact
+                if (byEmail.isNotEmpty()) return@withContext byEmail.first()
+            }
+
+            if (cleanName.isNotBlank() && !cleanName.equals(cleanEmail, ignoreCase = true)) {
+                val byName = queryProfiles(cleanName)
+                val exact = byName.firstOrNull { p ->
+                    (cleanEmail.isNotBlank() && (p.email.equals(cleanEmail, ignoreCase = true) ||
+                        p.aliases.any { it.equals(cleanEmail, ignoreCase = true) })) ||
+                        p.displayName.equals(cleanName, ignoreCase = true)
+                }
+                if (exact != null) return@withContext exact
+                if (byName.size == 1) return@withContext byName.first()
+            }
+            null
+        }
+
     suspend fun getContacts(): List<ContactEntry> = withContext(Dispatchers.IO) {
         val xml = postSoapWithAuthFallback(EwsXml.buildFindContactsRequest())
         EwsXml.parseFindContactsResponse(xml)

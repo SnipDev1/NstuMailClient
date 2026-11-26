@@ -6,14 +6,18 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.EwsXml
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.OutgoingAttachment
+import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.participants
 import ru.nstu.mail.ui.extractInitials
+import ru.nstu.mail.ui.formatShortPersonName
 import java.util.Base64
 
 class EwsXmlTest {
@@ -380,5 +384,83 @@ class EwsXmlTest {
         assertEquals("/EWS/Exchange.asmx/s/GetUserPhoto", photoUrl.encodedPath)
         assertEquals("user@stud.nstu.ru", photoUrl.queryParameter("email"))
         assertEquals("HR96x96", photoUrl.queryParameter("size"))
+    }
+
+    @Test
+    fun `formatShortPersonName participants and parsePersonProfilesFromResolveNames work`() {
+        assertEquals("Никулин Е.Н.", formatShortPersonName("Никулин Евгений Николаевич", "nikulin@corp.nstu.ru"))
+        assertEquals("Иванов П.", formatShortPersonName("Иванов Пётр", "ivanov@corp.nstu.ru"))
+        assertEquals("GitHub", formatShortPersonName("GitHub", "noreply@github.com"))
+        assertEquals("student.2025", formatShortPersonName("", "student.2025@stud.nstu.ru"))
+
+        val detail = EmailDetail(
+            id = "1",
+            changeKey = "ck",
+            subject = "S",
+            from = "Преподаватель",
+            fromEmail = "prof@corp.nstu.ru",
+            to = listOf("Студент А.Б. <a@stud.nstu.ru>"),
+            cc = listOf("b@stud.nstu.ru"),
+            bcc = listOf("Скрытый <c@stud.nstu.ru>"),
+            receivedAt = "",
+            body = "",
+            isHtml = false,
+            isRead = true,
+            attachments = emptyList()
+        )
+        val parts = detail.participants()
+        assertEquals(4, parts.size)
+        assertEquals(ParticipantRole.FROM, parts[0].role)
+        assertEquals("Преподаватель", parts[0].name)
+        assertEquals(ParticipantRole.TO, parts[1].role)
+        assertEquals("Студент А.Б.", parts[1].name)
+        assertEquals("a@stud.nstu.ru", parts[1].email)
+        assertEquals(ParticipantRole.CC, parts[2].role)
+        assertEquals(ParticipantRole.BCC, parts[3].role)
+
+        val adXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:ResolveNamesResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                        xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:ResolveNamesResponseMessage ResponseClass="Success">
+                      <m:ResolutionSet>
+                        <t:Resolution>
+                          <t:Mailbox>
+                            <t:Name>a.nikulin</t:Name>
+                            <t:EmailAddress>a.nikulin@corp.nstu.ru</t:EmailAddress>
+                          </t:Mailbox>
+                          <t:Contact>
+                            <t:DisplayName>Никулин Андрей Викторович</t:DisplayName>
+                            <t:CompanyName>НГТУ</t:CompanyName>
+                            <t:Department>Кафедра ВТ</t:Department>
+                            <t:JobTitle>Доцент</t:JobTitle>
+                            <t:OfficeLocation>1-305</t:OfficeLocation>
+                            <t:EmailAddresses>
+                              <t:Entry Key="EmailAddress1">SMTP:a.nikulin@corp.nstu.ru</t:Entry>
+                              <t:Entry Key="EmailAddress2">smtp:nav@smc.nstu.ru</t:Entry>
+                            </t:EmailAddresses>
+                            <t:PhoneNumbers>
+                              <t:Entry Key="BusinessPhone">+7-383-346-00-00</t:Entry>
+                              <t:Entry Key="MobilePhone"/>
+                            </t:PhoneNumbers>
+                          </t:Contact>
+                        </t:Resolution>
+                      </m:ResolutionSet>
+                    </m:ResolveNamesResponseMessage>
+                  </m:ResponseMessages>
+                </m:ResolveNamesResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val profiles = EwsXml.parsePersonProfilesFromResolveNames(adXml)
+        assertEquals(1, profiles.size)
+        assertEquals("Никулин Андрей Викторович", profiles[0].displayName)
+        assertEquals("Доцент", profiles[0].jobTitle)
+        assertEquals("Кафедра ВТ", profiles[0].department)
+        assertEquals("1-305", profiles[0].officeLocation)
+        assertEquals(listOf("nav@smc.nstu.ru"), profiles[0].aliases)
+        assertEquals(listOf("Рабочий" to "+7-383-346-00-00"), profiles[0].phones)
     }
 }

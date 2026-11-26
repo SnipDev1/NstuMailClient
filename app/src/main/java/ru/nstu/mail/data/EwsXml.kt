@@ -659,6 +659,16 @@ object EwsXml {
     }
 
     fun parseResolveNamesResponse(xml: String): List<ContactEntry> {
+        return parsePersonProfilesFromResolveNames(xml).map { p ->
+            ContactEntry(
+                name = p.displayName.ifBlank { p.email },
+                email = p.email,
+                isFromDirectory = true
+            )
+        }.distinctBy { it.email.lowercase() }
+    }
+
+    fun parsePersonProfilesFromResolveNames(xml: String): List<PersonProfile> {
         val doc = parseDocument(xml)
         val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
         if (faults.length > 0) checkSoapErrors(doc)
@@ -672,21 +682,65 @@ object EwsXml {
         }
 
         val resolutions = doc.getElementsByTagNameNS(EWS_TYPES, "Resolution")
-        val list = mutableListOf<ContactEntry>()
+        val list = mutableListOf<PersonProfile>()
         for (i in 0 until resolutions.length) {
             val res = resolutions.item(i) as? Element ?: continue
             val mb = res.firstChildElement(EWS_TYPES, "Mailbox") ?: continue
             val email = mb.firstChildText(EWS_TYPES, "EmailAddress")
-            val name = mb.firstChildText(EWS_TYPES, "Name").ifBlank { email }
-            if (email.isNotBlank()) {
-                list += ContactEntry(
-                    name = name,
-                    email = email,
-                    isFromDirectory = true
-                )
+            if (email.isBlank()) continue
+
+            val contact = res.firstChildElement(EWS_TYPES, "Contact")
+            val contactDisplayName = contact?.firstChildText(EWS_TYPES, "DisplayName").orEmpty()
+            val mbName = mb.firstChildText(EWS_TYPES, "Name")
+            val displayName = contactDisplayName.ifBlank { mbName.ifBlank { email } }
+
+            val aliases = mutableListOf<String>()
+            val emailContainer = contact?.firstChildElement(EWS_TYPES, "EmailAddresses")
+            if (emailContainer != null) {
+                val entries = emailContainer.getElementsByTagNameNS(EWS_TYPES, "Entry")
+                for (j in 0 until entries.length) {
+                    val raw = (entries.item(j) as? Element)?.textContent?.trim().orEmpty()
+                    val clean = raw.removePrefix("SMTP:").removePrefix("smtp:").trim()
+                    if (clean.contains('@') && !clean.equals(email, ignoreCase = true) &&
+                        aliases.none { it.equals(clean, ignoreCase = true) }
+                    ) {
+                        aliases += clean
+                    }
+                }
             }
+
+            val phones = mutableListOf<Pair<String, String>>()
+            val phoneContainer = contact?.firstChildElement(EWS_TYPES, "PhoneNumbers")
+            if (phoneContainer != null) {
+                val labels = mapOf(
+                    "BusinessPhone" to "Рабочий",
+                    "MobilePhone" to "Мобильный",
+                    "HomePhone" to "Домашний",
+                    "AssistantPhone" to "Ассистент"
+                )
+                val entries = phoneContainer.getElementsByTagNameNS(EWS_TYPES, "Entry")
+                for (j in 0 until entries.length) {
+                    val pe = entries.item(j) as? Element ?: continue
+                    val num = pe.textContent?.trim().orEmpty()
+                    if (num.isNotBlank()) {
+                        val key = pe.getAttribute("Key")
+                        phones += (labels[key] ?: key.ifBlank { "Телефон" }) to num
+                    }
+                }
+            }
+
+            list += PersonProfile(
+                displayName = displayName,
+                email = email,
+                aliases = aliases,
+                jobTitle = contact?.firstChildText(EWS_TYPES, "JobTitle").orEmpty(),
+                department = contact?.firstChildText(EWS_TYPES, "Department").orEmpty(),
+                company = contact?.firstChildText(EWS_TYPES, "CompanyName").orEmpty(),
+                officeLocation = contact?.firstChildText(EWS_TYPES, "OfficeLocation").orEmpty(),
+                phones = phones
+            )
         }
-        return list.distinctBy { it.email.lowercase() }
+        return list
     }
 
     fun buildFindContactsRequest(): String {

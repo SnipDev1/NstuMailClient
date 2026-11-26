@@ -1,6 +1,8 @@
 package ru.nstu.mail.ui
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color as AndroidColor
@@ -10,10 +12,12 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,7 +26,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
@@ -50,6 +58,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -58,19 +67,28 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.launch
 import ru.nstu.mail.data.AttachmentInfo
 import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
+import ru.nstu.mail.data.EmailParticipant
 import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.ParticipantRole
+import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.participants
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -79,10 +97,14 @@ fun MessageDetailScreen(
     folders: List<MailFolder>,
     currentFolder: MailFolder?,
     avatars: Map<String, ImageBitmap?>,
+    personProfiles: Map<String, PersonProfile?>,
+    loadingProfiles: Set<String>,
     isDownloadingAttachment: Boolean,
     toastMessage: String?,
     onBack: () -> Unit,
     onRequestAvatar: (String) -> Unit,
+    onRequestPersonProfile: (name: String, email: String) -> Unit,
+    onComposeTo: (String) -> Unit,
     onToggleRead: (EmailDetail) -> Unit,
     onToggleFlag: (EmailDetail) -> Unit,
     onReply: (EmailDetail) -> Unit,
@@ -98,15 +120,43 @@ fun MessageDetailScreen(
     BackHandler(onBack = onBack)
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var confirmDelete by remember { mutableStateOf(false) }
     var showMovePicker by remember { mutableStateOf(false) }
     var moreMenuExpanded by remember { mutableStateOf(false) }
+    var selectedParticipant by remember { mutableStateOf<EmailParticipant?>(null) }
+
+    val participants = remember(detail.id, detail.from, detail.fromEmail, detail.to, detail.cc, detail.bcc) {
+        detail.participants()
+    }
 
     LaunchedEffect(toastMessage) {
         val msg = toastMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         onClearToast()
+    }
+
+    selectedParticipant?.let { person ->
+        val key = person.email.trim().lowercase().ifBlank { person.name.trim().lowercase() }
+        PersonInfoDialog(
+            participant = person,
+            photo = avatars[person.email.trim().lowercase()],
+            profile = personProfiles[key],
+            isLoadingProfile = key in loadingProfiles,
+            onRequestProfile = { onRequestPersonProfile(person.name, person.email) },
+            onRequestAvatar = onRequestAvatar,
+            onCompose = {
+                selectedParticipant = null
+                if (person.email.isNotBlank()) onComposeTo(person.email)
+            },
+            onCopyEmail = { email ->
+                val cm = context.getSystemService(ClipboardManager::class.java)
+                cm?.setPrimaryClip(ClipData.newPlainText("email", email))
+                scope.launch { snackbarHostState.showSnackbar("Адрес скопирован: $email") }
+            },
+            onDismiss = { selectedParticipant = null }
+        )
     }
 
     if (showMovePicker) {
@@ -262,54 +312,28 @@ fun MessageDetailScreen(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold
                 )
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.Top) {
-                    UserAvatar(
-                        name = detail.from,
-                        email = detail.fromEmail,
-                        photo = avatars[detail.fromEmail.trim().lowercase()],
-                        size = 42.dp,
-                        onRequestLoad = onRequestAvatar
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (detail.fromEmail.isNotBlank() &&
-                                !detail.from.equals(detail.fromEmail, ignoreCase = true)
-                            ) {
-                                "${detail.from} <${detail.fromEmail}>"
-                            } else {
-                                detail.from
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        if (detail.to.isNotEmpty()) {
-                            Text(
-                                text = "Кому: ${detail.to.joinToString(", ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = MailViewModel.formatMailDate(detail.receivedAt, detailed = true),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (participants.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(end = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(participants, key = { "${it.role}:${it.email}:${it.name}" }) { person ->
+                            ParticipantAvatarTile(
+                                participant = person,
+                                photo = avatars[person.email.trim().lowercase()],
+                                onRequestAvatar = onRequestAvatar,
+                                onClick = { selectedParticipant = person }
                             )
                         }
-                        if (detail.cc.isNotEmpty()) {
-                            Text(
-                                text = "Копия: ${detail.cc.joinToString(", ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (detail.bcc.isNotEmpty()) {
-                            Text(
-                                text = "Скрытая копия: ${detail.bcc.joinToString(", ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Text(
-                            text = MailViewModel.formatMailDate(detail.receivedAt, detailed = true),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
 
@@ -434,4 +458,189 @@ private fun formatBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes Б"
     bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
     else -> String.format("%.1f МБ", bytes / (1024.0 * 1024.0))
+}
+
+@Composable
+private fun ParticipantAvatarTile(
+    participant: EmailParticipant,
+    photo: ImageBitmap?,
+    onRequestAvatar: (String) -> Unit,
+    onClick: () -> Unit
+) {
+    val isSender = participant.role == ParticipantRole.FROM
+    Column(
+        modifier = Modifier
+            .width(78.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Surface(
+            color = if (isSender) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text(
+                text = participant.role.labelRu,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isSender) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        UserAvatar(
+            name = participant.name,
+            email = participant.email,
+            photo = photo,
+            size = 44.dp,
+            onRequestLoad = onRequestAvatar
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = formatShortPersonName(participant.name, participant.email),
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = if (isSender) FontWeight.SemiBold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun PersonInfoDialog(
+    participant: EmailParticipant,
+    photo: ImageBitmap?,
+    profile: PersonProfile?,
+    isLoadingProfile: Boolean,
+    onRequestProfile: () -> Unit,
+    onRequestAvatar: (String) -> Unit,
+    onCompose: () -> Unit,
+    onCopyEmail: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    LaunchedEffect(participant.email, participant.name) {
+        onRequestProfile()
+    }
+
+    val fullName = profile?.displayName?.takeIf { it.isNotBlank() }
+        ?: participant.name.ifBlank { participant.email }
+    val primaryEmail = profile?.email?.takeIf { it.isNotBlank() } ?: participant.email
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = null,
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                UserAvatar(
+                    name = fullName,
+                    email = primaryEmail,
+                    photo = photo,
+                    size = 72.dp,
+                    onRequestLoad = onRequestAvatar
+                )
+                Spacer(Modifier.height(10.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = participant.role.labelRu,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = fullName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+                if (primaryEmail.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = primaryEmail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                if (isLoadingProfile) {
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                if (profile != null) {
+                    val rows = buildList {
+                        if (profile.jobTitle.isNotBlank()) add("Должность" to profile.jobTitle)
+                        if (profile.department.isNotBlank()) add("Подразделение" to profile.department)
+                        if (profile.company.isNotBlank()) add("Организация" to profile.company)
+                        if (profile.officeLocation.isNotBlank()) add("Кабинет" to profile.officeLocation)
+                        profile.phones.forEach { (label, num) -> add(label to num) }
+                        if (profile.aliases.isNotEmpty()) {
+                            add("Доп. адреса" to profile.aliases.joinToString("\n"))
+                        }
+                    }
+                    if (rows.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(8.dp))
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            rows.forEach { (label, value) ->
+                                Column {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = value,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (primaryEmail.isNotBlank()) {
+                TextButton(onClick = onCompose) {
+                    Text("Написать")
+                }
+            }
+        },
+        dismissButton = {
+            Row {
+                if (primaryEmail.isNotBlank()) {
+                    TextButton(onClick = { onCopyEmail(primaryEmail) }) {
+                        Text("Копировать")
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Закрыть")
+                }
+            }
+        }
+    )
 }

@@ -29,6 +29,8 @@ class MainActivity : ComponentActivity() {
                 val vm: MailViewModel = viewModel()
                 val state by vm.state.collectAsState()
                 val avatars by vm.avatars.collectAsState()
+                val personProfiles by vm.personProfiles.collectAsState()
+                val loadingProfiles by vm.loadingProfiles.collectAsState()
                 val context = LocalContext.current
 
                 state.availableUpdate?.let { update ->
@@ -91,10 +93,14 @@ class MainActivity : ComponentActivity() {
                                 folders = state.folders,
                                 currentFolder = state.currentFolder,
                                 avatars = avatars,
+                                personProfiles = personProfiles,
+                                loadingProfiles = loadingProfiles,
                                 isDownloadingAttachment = state.isDownloadingAttachment,
                                 toastMessage = state.toastMessage,
                                 onBack = vm::backToMailList,
                                 onRequestAvatar = vm::requestAvatar,
+                                onRequestPersonProfile = vm::requestPersonProfile,
+                                onComposeTo = { email -> vm.openCompose(prefillTo = email) },
                                 onToggleRead = vm::toggleRead,
                                 onToggleFlag = vm::toggleFlagDetail,
                                 onReply = { vm.openCompose(replyTo = it) },

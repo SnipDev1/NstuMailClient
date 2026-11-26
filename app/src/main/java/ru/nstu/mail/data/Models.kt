@@ -121,6 +121,65 @@ data class CalendarEvent(
     val isAllDay: Boolean
 )
 
+enum class ParticipantRole(val labelRu: String) {
+    FROM("От"),
+    TO("Кому"),
+    CC("Копия"),
+    BCC("СК")
+}
+
+data class EmailParticipant(
+    val name: String,
+    val email: String,
+    val role: ParticipantRole
+)
+
+data class PersonProfile(
+    val displayName: String,
+    val email: String,
+    val aliases: List<String> = emptyList(),
+    val jobTitle: String = "",
+    val department: String = "",
+    val company: String = "",
+    val officeLocation: String = "",
+    val phones: List<Pair<String, String>> = emptyList()
+)
+
+fun parseFormattedRecipient(raw: String): Pair<String, String> {
+    val trimmed = raw.trim()
+    val start = trimmed.lastIndexOf('<')
+    val end = trimmed.lastIndexOf('>')
+    if (start in 0 until end) {
+        val name = trimmed.substring(0, start).trim().trim('"', '\'')
+        val email = trimmed.substring(start + 1, end).trim()
+        return name.ifBlank { email } to email
+    }
+    return trimmed to if ('@' in trimmed) trimmed else ""
+}
+
+fun EmailDetail.participants(): List<EmailParticipant> {
+    val list = mutableListOf<EmailParticipant>()
+    if (from.isNotBlank() || fromEmail.isNotBlank()) {
+        list += EmailParticipant(
+            name = from.ifBlank { fromEmail },
+            email = fromEmail,
+            role = ParticipantRole.FROM
+        )
+    }
+    fun addList(raws: List<String>, role: ParticipantRole) {
+        for (raw in raws) {
+            val (name, email) = parseFormattedRecipient(raw)
+            if (name.isNotBlank() || email.isNotBlank()) {
+                list += EmailParticipant(name = name, email = email, role = role)
+            }
+        }
+    }
+    addList(to, ParticipantRole.TO)
+    addList(cc, ParticipantRole.CC)
+    addList(bcc, ParticipantRole.BCC)
+    return list
+}
+
 class EwsException(
     message: String,
     val isAuthError: Boolean = false,

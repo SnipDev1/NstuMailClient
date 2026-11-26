@@ -61,6 +61,28 @@ fun avatarColorFor(key: String): Color {
     return AVATAR_PALETTE[idx]
 }
 
+fun formatShortPersonName(name: String, email: String): String {
+    val cleanName = name.trim().replace(Regex("[\"'<>]"), "")
+    val words = cleanName
+        .split(Regex("\\s+"))
+        .map { it.trim(',', '.', ';', ':') }
+        .filter { it.isNotEmpty() && !it.contains('@') }
+
+    return when {
+        words.size >= 3 -> {
+            val i1 = words[1].firstOrNull()?.uppercaseChar()
+            val i2 = words[2].firstOrNull()?.uppercaseChar()
+            if (i1 != null && i2 != null) "${words[0]} $i1.$i2." else words[0]
+        }
+        words.size == 2 -> {
+            val i1 = words[1].firstOrNull()?.uppercaseChar()
+            if (i1 != null) "${words[0]} $i1." else words[0]
+        }
+        words.size == 1 -> words[0]
+        else -> email.trim().substringBefore('@').ifBlank { email.trim().ifBlank { "?" } }
+    }
+}
+
 @Composable
 fun UserAvatar(
     name: String,

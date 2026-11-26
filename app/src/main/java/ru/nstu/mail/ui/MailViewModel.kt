@@ -46,6 +46,7 @@ import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.OutgoingAttachment
+import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import java.io.File
 import java.time.Instant
@@ -111,6 +112,12 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     val avatars: StateFlow<Map<String, ImageBitmap?>> = _avatars.asStateFlow()
     private val requestedAvatars = Collections.synchronizedSet(mutableSetOf<String>())
     private val avatarSemaphore = Semaphore(4)
+
+    private val _personProfiles = MutableStateFlow<Map<String, PersonProfile?>>(emptyMap())
+    val personProfiles: StateFlow<Map<String, PersonProfile?>> = _personProfiles.asStateFlow()
+    private val _loadingProfiles = MutableStateFlow<Set<String>>(emptySet())
+    val loadingProfiles: StateFlow<Set<String>> = _loadingProfiles.asStateFlow()
+    private val requestedProfiles = Collections.synchronizedSet(mutableSetOf<String>())
 
     private var client: EwsClient? = null
     private var directoryJob: Job? = null
@@ -1156,11 +1163,28 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun requestPersonProfile(name: String, email: String) {
+        val key = email.trim().lowercase().ifBlank { name.trim().lowercase() }
+        if (key.isEmpty()) return
+        val c = client ?: return
+        if (!requestedProfiles.add(key)) return
+
+        viewModelScope.launch {
+            _loadingProfiles.update { it + key }
+            val profile = runCatching { c.resolvePersonProfile(email, name) }.getOrNull()
+            _personProfiles.update { it + (key to profile) }
+            _loadingProfiles.update { it - key }
+        }
+    }
+
     fun logout() {
         client = null
         store.clear()
         requestedAvatars.clear()
+        requestedProfiles.clear()
         _avatars.value = emptyMap()
+        _personProfiles.value = emptyMap()
+        _loadingProfiles.value = emptySet()
         runCatching {
             CookieManager.getInstance().removeAllCookies(null)
             CookieManager.getInstance().flush()
