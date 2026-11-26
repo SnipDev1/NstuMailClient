@@ -12,6 +12,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -467,7 +469,30 @@ private fun ParticipantAvatarTile(
     onRequestAvatar: (String) -> Unit,
     onClick: () -> Unit
 ) {
-    val isSender = participant.role == ParticipantRole.FROM
+    val badgeBg = when (participant.role) {
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.primaryContainer
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+    }
+    val badgeText = when (participant.role) {
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onPrimaryContainer
+        ParticipantRole.TO -> MaterialTheme.colorScheme.onTertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.50f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.70f)
+    }
+    val nameColor = when (participant.role) {
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onSurface
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiary
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+    }
+    val nameWeight = when (participant.role) {
+        ParticipantRole.FROM -> FontWeight.SemiBold
+        ParticipantRole.TO -> FontWeight.Medium
+        else -> FontWeight.Normal
+    }
+
     Column(
         modifier = Modifier
             .width(78.dp)
@@ -477,21 +502,13 @@ private fun ParticipantAvatarTile(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Surface(
-            color = if (isSender) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant
-            },
+            color = badgeBg,
             shape = RoundedCornerShape(8.dp)
         ) {
             Text(
                 text = participant.role.labelRu,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (isSender) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+                color = badgeText,
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
             )
         }
@@ -501,16 +518,22 @@ private fun ParticipantAvatarTile(
             email = participant.email,
             photo = photo,
             size = 44.dp,
-            onRequestLoad = onRequestAvatar
+            onRequestLoad = onRequestAvatar,
+            modifier = if (participant.role == ParticipantRole.TO) {
+                Modifier.border(1.5.dp, MaterialTheme.colorScheme.tertiary, CircleShape)
+            } else {
+                Modifier
+            }
         )
         Spacer(Modifier.height(4.dp))
         Text(
             text = formatShortPersonName(participant.name, participant.email),
             style = MaterialTheme.typography.labelSmall,
+            color = nameColor,
             textAlign = TextAlign.Center,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            fontWeight = if (isSender) FontWeight.SemiBold else FontWeight.Normal
+            fontWeight = nameWeight
         )
     }
 }

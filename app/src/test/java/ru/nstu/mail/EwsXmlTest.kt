@@ -412,10 +412,11 @@ class EwsXmlTest {
         assertEquals(4, parts.size)
         assertEquals(ParticipantRole.FROM, parts[0].role)
         assertEquals("Преподаватель", parts[0].name)
-        assertEquals(ParticipantRole.TO, parts[1].role)
-        assertEquals("Студент А.Б.", parts[1].name)
-        assertEquals("a@stud.nstu.ru", parts[1].email)
-        assertEquals(ParticipantRole.CC, parts[2].role)
+        assertEquals(ParticipantRole.CC, parts[1].role)
+        assertEquals("b@stud.nstu.ru", parts[1].email)
+        assertEquals(ParticipantRole.TO, parts[2].role)
+        assertEquals("Студент А.Б.", parts[2].name)
+        assertEquals("a@stud.nstu.ru", parts[2].email)
         assertEquals(ParticipantRole.BCC, parts[3].role)
 
         val adXml = """

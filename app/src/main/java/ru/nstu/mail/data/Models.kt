@@ -174,8 +174,8 @@ fun EmailDetail.participants(): List<EmailParticipant> {
             }
         }
     }
-    addList(to, ParticipantRole.TO)
     addList(cc, ParticipantRole.CC)
+    addList(to, ParticipantRole.TO)
     addList(bcc, ParticipantRole.BCC)
     return list
 }
