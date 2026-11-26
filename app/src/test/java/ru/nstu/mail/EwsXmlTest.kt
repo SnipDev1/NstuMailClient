@@ -9,18 +9,24 @@ import org.junit.Assert.fail
 import org.junit.Test
 import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
+import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.EwsXml
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.OutgoingAttachment
 import ru.nstu.mail.data.ParticipantRole
+import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.participants
+import ru.nstu.mail.notify.mergeSeenMessageIds
+import ru.nstu.mail.notify.selectNewMessagesToNotify
 import ru.nstu.mail.ui.extractInitials
 import ru.nstu.mail.ui.finalizeRecipientToken
 import ru.nstu.mail.ui.formatShortPersonName
+import ru.nstu.mail.ui.needsNameResolution
 import ru.nstu.mail.ui.parseRecipientTokens
+import ru.nstu.mail.ui.resolveDisplayName
 import java.util.Base64
 
 class EwsXmlTest {
@@ -482,5 +488,92 @@ class EwsXmlTest {
 
         assertEquals("Иван" to "ivan@nstu.ru", finalizeRecipientToken("Иван <ivan@nstu.ru>,"))
         assertNull(finalizeRecipientToken("без_собаки"))
+    }
+
+    @Test
+    fun `findPeople recipientcache and resolveDisplayName resolve student FIO`() {
+        val req = EwsXml.buildFindRecipientCacheRequest(50)
+        assertTrue(req.contains("<m:FindPeople>"))
+        assertTrue(req.contains("""Id="recipientcache""""))
+
+        val xml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <FindPeopleResponse ResponseClass="Success"
+                                    xmlns="http://schemas.microsoft.com/exchange/services/2006/messages">
+                  <ResponseCode>NoError</ResponseCode>
+                  <People>
+                    <Persona xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
+                      <DisplayName>Иванов Пётр Сергеевич</DisplayName>
+                      <EmailAddress>
+                        <Name>Иванов Пётр Сергеевич</Name>
+                        <EmailAddress>ivanov.2025@stud.nstu.ru</EmailAddress>
+                        <RoutingType>SMTP</RoutingType>
+                      </EmailAddress>
+                    </Persona>
+                    <Persona xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
+                      <DisplayName>Иванов Пётр Сергеевич</DisplayName>
+                      <EmailAddress>
+                        <Name>ivanov</Name>
+                        <EmailAddress>IVANOV.2025@stud.nstu.ru</EmailAddress>
+                      </EmailAddress>
+                    </Persona>
+                  </People>
+                </FindPeopleResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val cache = EwsXml.parseFindPeopleResponse(xml)
+        assertEquals(1, cache.size)
+        assertEquals("Иванов Пётр Сергеевич", cache[0].name)
+        assertEquals("ivanov.2025@stud.nstu.ru", cache[0].email)
+
+        val errXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <FindPeopleResponse ResponseClass="Error"
+                                    xmlns="http://schemas.microsoft.com/exchange/services/2006/messages"/>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        assertTrue(EwsXml.parseFindPeopleResponse(errXml).isEmpty())
+
+        assertTrue(needsNameResolution("", "a.nikulin@corp.nstu.ru"))
+        assertTrue(needsNameResolution("a.nikulin", "a.nikulin@corp.nstu.ru"))
+        assertTrue(needsNameResolution("a.nikulin@corp.nstu.ru", "a.nikulin@corp.nstu.ru"))
+        assertFalse(needsNameResolution("Никулин Андрей Викторович", "a.nikulin@corp.nstu.ru"))
+
+        val known = mapOf("ivanov.2025@stud.nstu.ru" to "Иванов Пётр Сергеевич")
+        assertEquals(
+            "Иванов Пётр Сергеевич",
+            resolveDisplayName("ivanov.2025@stud.nstu.ru", "ivanov.2025@stud.nstu.ru", null, known)
+        )
+        assertEquals(
+            "Никулин Андрей Викторович",
+            resolveDisplayName(
+                "a.nikulin",
+                "a.nikulin@corp.nstu.ru",
+                PersonProfile("Никулин Андрей Викторович", "a.nikulin@corp.nstu.ru"),
+                emptyMap()
+            )
+        )
+    }
+
+    @Test
+    fun `inbox unread request and notification baseline logic work properly`() {
+        val req = EwsXml.buildFindInboxUnreadRequest(10)
+        assertTrue(req.contains("""<t:DistinguishedFolderId Id="inbox"/>"""))
+        assertTrue(req.contains("""FieldURI="message:IsRead""""))
+        assertTrue(req.contains("""Value="false""""))
+
+        val m1 = EmailSummary("id1", "c1", "Subj 1", "A", "a@nstu.ru", "", isRead = false, hasAttachments = false, preview = "")
+        val m2 = EmailSummary("id2", "c2", "Subj 2", "B", "b@nstu.ru", "", isRead = false, hasAttachments = false, preview = "")
+
+        assertTrue(selectNewMessagesToNotify(listOf(m1, m2), emptySet(), initialized = false).isEmpty())
+        val notified = selectNewMessagesToNotify(listOf(m1, m2), setOf("id1"), initialized = true)
+        assertEquals(listOf("id2"), notified.map { it.id })
+
+        val merged = mergeSeenMessageIds(listOf("a", "b", "c"), listOf("b", "d", "e"), maxSize = 4)
+        assertEquals(listOf("b", "c", "d", "e"), merged)
     }
 }

@@ -48,6 +48,9 @@ import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.OutgoingAttachment
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.data.UpdateChannel
+import ru.nstu.mail.data.parseFormattedRecipient
+import ru.nstu.mail.notify.MailNotificationHelper
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -69,6 +72,7 @@ sealed interface Screen {
     ) : Screen
     data object Contacts : Screen
     data object Calendar : Screen
+    data object Settings : Screen
     data object OwaWebView : Screen
 }
 
@@ -104,9 +108,25 @@ data class MailUiState(
 class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = CredentialStore(application)
+    private val prefs = application.getSharedPreferences("nstumail_prefs", Context.MODE_PRIVATE)
     private val updater = AppUpdater()
     private val _state = MutableStateFlow(MailUiState())
     val state: StateFlow<MailUiState> = _state.asStateFlow()
+
+    private val _themeMode = MutableStateFlow(loadThemeMode())
+    val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
+
+    private val _updateChannel = MutableStateFlow(loadUpdateChannel())
+    val updateChannel: StateFlow<UpdateChannel> = _updateChannel.asStateFlow()
+
+    private val _notificationsEnabled = MutableStateFlow(MailNotificationHelper.isEnabled(application))
+    val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled.asStateFlow()
+
+    private val _notificationIntervalMinutes =
+        MutableStateFlow(MailNotificationHelper.getIntervalMinutes(application))
+    val notificationIntervalMinutes: StateFlow<Int> = _notificationIntervalMinutes.asStateFlow()
+
+    private var pendingNotificationMessageId: String? = null
 
     private val _avatars = MutableStateFlow<Map<String, ImageBitmap?>>(emptyMap())
     val avatars: StateFlow<Map<String, ImageBitmap?>> = _avatars.asStateFlow()
@@ -115,6 +135,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _personProfiles = MutableStateFlow<Map<String, PersonProfile?>>(emptyMap())
     val personProfiles: StateFlow<Map<String, PersonProfile?>> = _personProfiles.asStateFlow()
+    private val _knownNames = MutableStateFlow<Map<String, String>>(emptyMap())
+    val knownNames: StateFlow<Map<String, String>> = _knownNames.asStateFlow()
     private val _loadingProfiles = MutableStateFlow<Set<String>>(emptySet())
     val loadingProfiles: StateFlow<Set<String>> = _loadingProfiles.asStateFlow()
     private val requestedProfiles = Collections.synchronizedSet(mutableSetOf<String>())
@@ -130,6 +152,116 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             login(saved.email, saved.password, saved.serverUrl)
         }
         checkForUpdates(manual = false)
+    }
+
+    private fun loadThemeMode(): AppThemeMode =
+        runCatching {
+            val saved = prefs.getString("theme_mode", AppThemeMode.SYSTEM.name)
+            AppThemeMode.valueOf(saved ?: AppThemeMode.SYSTEM.name)
+        }.getOrDefault(AppThemeMode.SYSTEM)
+
+    fun setThemeMode(mode: AppThemeMode) {
+        prefs.edit().putString("theme_mode", mode.name).apply()
+        _themeMode.value = mode
+    }
+
+    private fun loadUpdateChannel(): UpdateChannel {
+        val defaultChannel = if ('-' in BuildConfig.VERSION_NAME) {
+            UpdateChannel.TEST
+        } else {
+            UpdateChannel.STABLE
+        }
+        return runCatching {
+            val saved = prefs.getString("update_channel", defaultChannel.name)
+            UpdateChannel.valueOf(saved ?: defaultChannel.name)
+        }.getOrDefault(defaultChannel)
+    }
+
+    fun openSettings() {
+        _state.update { it.copy(screen = Screen.Settings, errorMessage = null) }
+    }
+
+    fun setUpdateChannel(channel: UpdateChannel) {
+        if (_updateChannel.value == channel) return
+        prefs.edit().putString("update_channel", channel.name).apply()
+        _updateChannel.value = channel
+        _state.update {
+            it.copy(
+                availableUpdate = null,
+                downloadedUpdatePath = null,
+                updateDownloadProgress = null,
+                updateError = null
+            )
+        }
+        checkForUpdates(manual = false)
+    }
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
+        MailNotificationHelper.setEnabled(app, enabled)
+        _notificationsEnabled.value = enabled
+        if (enabled) {
+            val currentInbox = if (_state.value.currentFolder?.systemKind == SystemFolderKind.INBOX) {
+                _state.value.messages
+            } else {
+                emptyList()
+            }
+            if (currentInbox.isNotEmpty() || !MailNotificationHelper.isBaselineReady(app)) {
+                MailNotificationHelper.recordSeenMessages(app, currentInbox)
+            }
+            MailNotificationHelper.schedulePeriodicCheck(app, replaceExisting = true)
+        } else {
+            MailNotificationHelper.cancelPeriodicCheck(app)
+            MailNotificationHelper.cancelNotifications(app)
+        }
+    }
+
+    fun setNotificationInterval(minutes: Int) {
+        val app = getApplication<Application>()
+        MailNotificationHelper.setIntervalMinutes(app, minutes)
+        _notificationIntervalMinutes.value = MailNotificationHelper.getIntervalMinutes(app)
+        if (_notificationsEnabled.value) {
+            MailNotificationHelper.schedulePeriodicCheck(app, replaceExisting = true)
+        }
+    }
+
+    fun checkNewMailNow() {
+        val app = getApplication<Application>()
+        if (!_notificationsEnabled.value || !MailNotificationHelper.hasSystemPermission(app)) {
+            _state.update { it.copy(toastMessage = "Включите уведомления и выдайте разрешение системы") }
+            return
+        }
+        MailNotificationHelper.runImmediateCheck(app)
+        _state.update { it.copy(toastMessage = "Проверка новых писем запущена") }
+    }
+
+    fun onNotificationPermissionResult(granted: Boolean) {
+        val app = getApplication<Application>()
+        MailNotificationHelper.markPermissionAsked(app)
+        if (granted) {
+            setNotificationsEnabled(true)
+        } else {
+            MailNotificationHelper.setEnabled(app, false)
+            _notificationsEnabled.value = false
+            MailNotificationHelper.cancelPeriodicCheck(app)
+        }
+    }
+
+    private fun rememberKnownNames(pairs: Iterable<Pair<String, String>>) {
+        val current = _knownNames.value
+        val additions = mutableMapOf<String, String>()
+        for ((rawEmail, rawName) in pairs) {
+            val key = rawEmail.trim().lowercase()
+            val cleanName = rawName.trim()
+            if ('@' in key && cleanName.isNotEmpty() && !needsNameResolution(cleanName, key)) {
+                if (current[key] != cleanName) {
+                    additions[key] = cleanName
+                }
+            }
+        }
+        if (additions.isNotEmpty()) {
+            _knownNames.update { it + additions }
+        }
     }
 
     fun login(email: String, password: String, serverUrl: String = DEFAULT_SERVER_URL) {
@@ -176,6 +308,19 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 client = newClient
                 store.save(creds)
+                rememberKnownNames(items.map { it.senderEmail to it.senderName })
+                val app = getApplication<Application>()
+                if (inbox?.systemKind == SystemFolderKind.INBOX) {
+                    MailNotificationHelper.recordSeenMessages(app, items)
+                }
+                MailNotificationHelper.schedulePeriodicCheck(app, replaceExisting = false)
+                viewModelScope.launch {
+                    runCatching { newClient.getRecipientCache() }
+                        .onSuccess { cache ->
+                            rememberKnownNames(cache.map { it.email to it.name })
+                        }
+                }
+                requestPersonProfile("", creds.email)
                 _state.update {
                     it.copy(
                         screen = Screen.MailList,
@@ -189,6 +334,10 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         messages = items,
                         reachedEnd = includesLast
                     )
+                }
+                pendingNotificationMessageId?.let { pendingId ->
+                    pendingNotificationMessageId = null
+                    openMessageById(pendingId)
                 }
             } catch (e: EwsException) {
                 _state.update {
@@ -331,6 +480,14 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     query = query,
                     filter = filter
                 )
+                rememberKnownNames(items.map { it.senderEmail to it.senderName })
+                if (updatedCurrent?.systemKind == SystemFolderKind.INBOX &&
+                    reset &&
+                    query.isBlank() &&
+                    filter == MailFilter.ALL
+                ) {
+                    MailNotificationHelper.recordSeenMessages(getApplication(), items)
+                }
                 _state.update { st ->
                     val merged = if (reset) items else (st.messages + items).distinctBy { it.id }
                     st.copy(
@@ -646,10 +803,20 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val c = client ?: return
+        openMessageById(summary.id, c)
+    }
+
+    fun openMessageById(itemId: String, activeClient: EwsClient? = client) {
+        if (itemId.isBlank()) return
+        val c = activeClient
+        if (c == null) {
+            pendingNotificationMessageId = itemId
+            return
+        }
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, errorMessage = null) }
             try {
-                var detail = c.getMessage(summary.id)
+                var detail = c.getMessage(itemId)
                 if (!detail.isRead && !detail.isDraft) {
                     runCatching { c.setRead(listOf(detail.id to detail.changeKey), true) }
                     detail = detail.copy(isRead = true)
@@ -669,9 +836,18 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     detail = resolveInlineCidImages(c, detail)
                 }
 
+                val detailNames = buildList {
+                    add(detail.fromEmail to detail.from)
+                    (detail.to + detail.cc + detail.bcc).forEach { raw ->
+                        val (n, e) = parseFormattedRecipient(raw)
+                        if (e.isNotBlank()) add(e to n)
+                    }
+                }
+                rememberKnownNames(detailNames)
+
                 _state.update { st ->
                     val updatedList = st.messages.map {
-                        if (it.id == summary.id) it.copy(isRead = true) else it
+                        if (it.id == detail.id) it.copy(isRead = true) else it
                     }
                     st.copy(
                         isLoading = false,
@@ -821,8 +997,17 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         replyAll: Boolean = false,
         isForward: Boolean = false,
         draft: EmailDetail? = null,
-        prefillTo: String? = null
+        prefillTo: String? = null,
+        prefillName: String? = null
     ) {
+        val formattedPrefill = prefillTo?.let { email ->
+            val resolved = resolveDisplayName(prefillName.orEmpty(), email, null, _knownNames.value)
+            if (resolved.isNotBlank() && !needsNameResolution(resolved, email)) {
+                "$resolved <$email>"
+            } else {
+                email
+            }
+        }
         val effectiveReplyTo = if (prefillTo != null && replyTo == null && draft == null) {
             EmailDetail(
                 id = "",
@@ -841,8 +1026,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             replyTo
         }
-        val effectiveDraft = if (prefillTo != null && draft == null && replyTo == null) {
-            effectiveReplyTo?.copy(isDraft = true, to = listOf(prefillTo))
+        val effectiveDraft = if (formattedPrefill != null && draft == null && replyTo == null) {
+            effectiveReplyTo?.copy(isDraft = true, to = listOf(formattedPrefill))
         } else {
             draft
         }
@@ -867,11 +1052,26 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(directorySuggestions = emptyList()) }
             return
         }
+        val localMatches = _knownNames.value.entries
+            .filter { (email, name) ->
+                email.contains(token, ignoreCase = true) || name.contains(token, ignoreCase = true)
+            }
+            .map { (email, name) -> ContactEntry(name = name, email = email, isFromDirectory = true) }
+        if (localMatches.isNotEmpty()) {
+            _state.update { it.copy(directorySuggestions = localMatches.take(8)) }
+        }
         val c = client ?: return
         directoryJob = viewModelScope.launch {
             delay(300)
             runCatching { c.resolveNames(token) }
-                .onSuccess { list -> _state.update { it.copy(directorySuggestions = list.take(6)) } }
+                .onSuccess { remote ->
+                    rememberKnownNames(remote.map { it.email to it.name })
+                    val merged = (remote + localMatches)
+                        .sortedBy { needsNameResolution(it.name, it.email) }
+                        .distinctBy { it.email.lowercase() }
+                        .take(8)
+                    _state.update { it.copy(directorySuggestions = merged) }
+                }
         }
     }
 
@@ -983,6 +1183,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(isLoading = true) }
             try {
                 val list = c.getContacts()
+                rememberKnownNames(list.map { it.email to it.name })
                 _state.update { it.copy(isLoading = false, contacts = list) }
             } catch (e: Exception) {
                 _state.update {
@@ -1006,6 +1207,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 c.createContact(name, email)
                 val list = c.getContacts()
+                rememberKnownNames(list.map { it.email to it.name })
                 _state.update {
                     it.copy(
                         isLoading = false,
@@ -1172,6 +1374,14 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _loadingProfiles.update { it + key }
             val profile = runCatching { c.resolvePersonProfile(email, name) }.getOrNull()
+            if (profile != null && profile.displayName.isNotBlank()) {
+                val pairs = buildList {
+                    if (email.isNotBlank()) add(email to profile.displayName)
+                    if (profile.email.isNotBlank()) add(profile.email to profile.displayName)
+                    profile.aliases.forEach { alias -> add(alias to profile.displayName) }
+                }
+                rememberKnownNames(pairs)
+            }
             _personProfiles.update { it + (key to profile) }
             _loadingProfiles.update { it - key }
         }
@@ -1179,11 +1389,14 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logout() {
         client = null
+        pendingNotificationMessageId = null
         store.clear()
+        MailNotificationHelper.clearOnLogout(getApplication())
         requestedAvatars.clear()
         requestedProfiles.clear()
         _avatars.value = emptyMap()
         _personProfiles.value = emptyMap()
+        _knownNames.value = emptyMap()
         _loadingProfiles.value = emptySet()
         runCatching {
             CookieManager.getInstance().removeAllCookies(null)
@@ -1203,10 +1416,11 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkForUpdates(manual: Boolean) {
         if (_state.value.isCheckingUpdate) return
+        val channel = _updateChannel.value
         viewModelScope.launch {
             _state.update { it.copy(isCheckingUpdate = true) }
             try {
-                val update = updater.checkLatestRelease()
+                val update = updater.checkLatestRelease(channel = channel)
                 _state.update { st ->
                     st.copy(
                         isCheckingUpdate = false,
@@ -1215,7 +1429,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         updateDownloadProgress = if (update != null) null else st.updateDownloadProgress,
                         updateError = null,
                         toastMessage = if (manual && update == null) {
-                            "Установлена последняя версия (${BuildConfig.VERSION_NAME})"
+                            "Установлена последняя версия (${BuildConfig.VERSION_NAME}, ветка: ${channel.labelRu})"
                         } else {
                             st.toastMessage
                         }

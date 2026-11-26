@@ -22,7 +22,32 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import ru.nstu.mail.data.PersonProfile
 import kotlin.math.absoluteValue
+
+fun needsNameResolution(name: String, email: String): Boolean {
+    val cleanEmail = email.trim()
+    if ('@' !in cleanEmail) return false
+    val cleanName = name.trim().replace(Regex("[\"'<>]"), "")
+    if (cleanName.isEmpty() || '@' in cleanName) return true
+    return cleanName.equals(cleanEmail.substringBefore('@'), ignoreCase = true)
+}
+
+fun resolveDisplayName(
+    name: String,
+    email: String,
+    profile: PersonProfile?,
+    knownNames: Map<String, String>
+): String {
+    val key = email.trim().lowercase()
+    val profileName = profile?.displayName?.trim().orEmpty()
+    if (profileName.isNotEmpty() && !needsNameResolution(profileName, email)) return profileName
+    val cleanName = name.trim()
+    if (cleanName.isNotEmpty() && !needsNameResolution(cleanName, email)) return cleanName
+    val cached = knownNames[key]?.trim().orEmpty()
+    if (cached.isNotEmpty() && !needsNameResolution(cached, email)) return cached
+    return profileName.ifEmpty { cleanName.ifEmpty { email.trim() } }
+}
 
 private val AVATAR_PALETTE = listOf(
     Color(0xFF006B47),

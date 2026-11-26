@@ -11,6 +11,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
+enum class AppThemeMode(val labelRu: String) {
+    SYSTEM("Системная"),
+    LIGHT("Светлая"),
+    DARK("Тёмная")
+}
+
 private val NstuGreen = Color(0xFF006B47)
 private val NstuGreenLight = Color(0xFF5CDAA5)
 private val NstuGreenContainer = Color(0xFFC2F2DB)

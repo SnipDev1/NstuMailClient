@@ -33,7 +33,13 @@ fun UpdateDialog(
     AlertDialog(
         onDismissRequest = { if (!isDownloading) onDismiss() },
         title = {
-            Text("Доступно обновление ${update.tagName}")
+            Text(
+                if (update.isPrerelease) {
+                    "Доступна тестовая сборка ${update.tagName}"
+                } else {
+                    "Доступно обновление ${update.tagName}"
+                }
+            )
         },
         text = {
             Column {

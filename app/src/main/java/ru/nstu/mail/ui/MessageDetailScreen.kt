@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.os.Build
 import android.text.Html
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -74,7 +75,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -100,13 +103,15 @@ fun MessageDetailScreen(
     currentFolder: MailFolder?,
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
+    knownNames: Map<String, String>,
     loadingProfiles: Set<String>,
+    darkTheme: Boolean,
     isDownloadingAttachment: Boolean,
     toastMessage: String?,
     onBack: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestPersonProfile: (name: String, email: String) -> Unit,
-    onComposeTo: (String) -> Unit,
+    onComposeTo: (email: String, name: String) -> Unit,
     onToggleRead: (EmailDetail) -> Unit,
     onToggleFlag: (EmailDetail) -> Unit,
     onReply: (EmailDetail) -> Unit,
@@ -128,6 +133,7 @@ fun MessageDetailScreen(
     var showMovePicker by remember { mutableStateOf(false) }
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var selectedParticipant by remember { mutableStateOf<EmailParticipant?>(null) }
+    var forceLightBody by remember(detail.id) { mutableStateOf(false) }
 
     val participants = remember(detail.id, detail.from, detail.fromEmail, detail.to, detail.cc, detail.bcc) {
         detail.participants()
@@ -141,16 +147,19 @@ fun MessageDetailScreen(
 
     selectedParticipant?.let { person ->
         val key = person.email.trim().lowercase().ifBlank { person.name.trim().lowercase() }
+        val profile = personProfiles[key]
+        val fullName = resolveDisplayName(person.name, person.email, profile, knownNames)
         PersonInfoDialog(
             participant = person,
             photo = avatars[person.email.trim().lowercase()],
-            profile = personProfiles[key],
+            profile = profile,
+            knownNames = knownNames,
             isLoadingProfile = key in loadingProfiles,
             onRequestProfile = { onRequestPersonProfile(person.name, person.email) },
             onRequestAvatar = onRequestAvatar,
             onCompose = {
                 selectedParticipant = null
-                if (person.email.isNotBlank()) onComposeTo(person.email)
+                if (person.email.isNotBlank()) onComposeTo(person.email, fullName)
             },
             onCopyEmail = { email ->
                 val cm = context.getSystemService(ClipboardManager::class.java)
@@ -279,6 +288,20 @@ fun MessageDetailScreen(
                                 },
                                 onClick = { moreMenuExpanded = false; onToggleSpam(detail) }
                             )
+                            if (darkTheme) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (forceLightBody) "Тёмный фон письма"
+                                            else "Светлый фон письма"
+                                        )
+                                    },
+                                    onClick = {
+                                        moreMenuExpanded = false
+                                        forceLightBody = !forceLightBody
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("Удалить") },
                                 leadingIcon = { Icon(Icons.Default.Delete, null) },
@@ -329,10 +352,14 @@ fun MessageDetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(participants, key = { "${it.role}:${it.email}:${it.name}" }) { person ->
+                            val key = person.email.trim().lowercase().ifBlank { person.name.trim().lowercase() }
                             ParticipantAvatarTile(
                                 participant = person,
                                 photo = avatars[person.email.trim().lowercase()],
+                                profile = personProfiles[key],
+                                knownNames = knownNames,
                                 onRequestAvatar = onRequestAvatar,
+                                onRequestProfile = { onRequestPersonProfile(person.name, person.email) },
                                 onClick = { selectedParticipant = person }
                             )
                         }
@@ -369,12 +396,30 @@ fun MessageDetailScreen(
 
             HorizontalDivider()
 
-            val htmlContent = remember(detail.id, detail.body, detail.isHtml) {
-                wrapEmailBody(detail.body, detail.isHtml)
+            val effectiveDarkBody = darkTheme && !forceLightBody
+            val bodyBgColor = if (effectiveDarkBody) MaterialTheme.colorScheme.surface else Color.White
+            val bodyTextColor = if (effectiveDarkBody) MaterialTheme.colorScheme.onSurface else Color(0xFF1B1B1B)
+            val bodyLinkColor = if (effectiveDarkBody) MaterialTheme.colorScheme.primary else Color(0xFF006B47)
+
+            val bgHex = bodyBgColor.toCssHex()
+            val textHex = bodyTextColor.toCssHex()
+            val linkHex = bodyLinkColor.toCssHex()
+
+            val htmlContent = remember(detail.id, detail.body, detail.isHtml, effectiveDarkBody, bgHex, textHex, linkHex) {
+                wrapEmailBody(
+                    body = detail.body,
+                    isHtml = detail.isHtml,
+                    darkMode = effectiveDarkBody,
+                    bgHex = bgHex,
+                    textHex = textHex,
+                    linkHex = linkHex
+                )
             }
 
             SandboxedEmailWebView(
                 html = htmlContent,
+                backgroundColorInt = bodyBgColor.toArgb(),
+                darkMode = effectiveDarkBody,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -383,10 +428,15 @@ fun MessageDetailScreen(
     }
 }
 
+private fun Color.toCssHex(): String =
+    String.format("#%06X", toArgb() and 0xFFFFFF)
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun SandboxedEmailWebView(
     html: String,
+    backgroundColorInt: Int,
+    darkMode: Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -394,7 +444,7 @@ private fun SandboxedEmailWebView(
         modifier = modifier,
         factory = { ctx ->
             WebView(ctx).apply {
-                setBackgroundColor(AndroidColor.WHITE)
+                setBackgroundColor(backgroundColorInt)
                 settings.apply {
                     javaScriptEnabled = false
                     allowFileAccess = false
@@ -409,6 +459,9 @@ private fun SandboxedEmailWebView(
                     displayZoomControls = false
                     loadWithOverviewMode = true
                     useWideViewPort = true
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        isAlgorithmicDarkeningAllowed = darkMode
+                    }
                 }
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(
@@ -427,12 +480,26 @@ private fun SandboxedEmailWebView(
             }
         },
         update = { webView ->
-            webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+            webView.setBackgroundColor(backgroundColorInt)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                webView.settings.isAlgorithmicDarkeningAllowed = darkMode
+            }
+            if (webView.tag != html) {
+                webView.tag = html
+                webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+            }
         }
     )
 }
 
-private fun wrapEmailBody(body: String, isHtml: Boolean): String {
+private fun wrapEmailBody(
+    body: String,
+    isHtml: Boolean,
+    darkMode: Boolean,
+    bgHex: String,
+    textHex: String,
+    linkHex: String
+): String {
     val content = if (isHtml) {
         body
     } else {
@@ -440,13 +507,16 @@ private fun wrapEmailBody(body: String, isHtml: Boolean): String {
             Html.escapeHtml(body) +
             "</pre>"
     }
+    val colorSchemeMeta = if (darkMode) "dark light" else "light"
     return """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="color-scheme" content="$colorSchemeMeta"/>
 <style>
-body { margin: 16px; color: #1b1b1b; background: #ffffff; font-family: sans-serif; line-height: 1.45; word-wrap: break-word; }
+body { margin: 16px; color: $textHex; background: $bgHex; font-family: sans-serif; line-height: 1.45; word-wrap: break-word; }
+a { color: $linkHex; }
 img { max-width: 100%; height: auto; }
 table { max-width: 100%; }
 </style>
@@ -466,9 +536,24 @@ private fun formatBytes(bytes: Long): String = when {
 private fun ParticipantAvatarTile(
     participant: EmailParticipant,
     photo: ImageBitmap?,
+    profile: PersonProfile?,
+    knownNames: Map<String, String>,
     onRequestAvatar: (String) -> Unit,
+    onRequestProfile: () -> Unit,
     onClick: () -> Unit
 ) {
+    val emailKey = participant.email.trim().lowercase()
+    val cachedName = knownNames[emailKey]
+    LaunchedEffect(participant.email, cachedName) {
+        if (needsNameResolution(participant.name, participant.email) &&
+            cachedName.isNullOrBlank() &&
+            profile == null
+        ) {
+            onRequestProfile()
+        }
+    }
+
+    val resolvedName = resolveDisplayName(participant.name, participant.email, profile, knownNames)
     val badgeBg = when (participant.role) {
         ParticipantRole.FROM -> MaterialTheme.colorScheme.primaryContainer
         ParticipantRole.TO -> MaterialTheme.colorScheme.tertiaryContainer
@@ -514,7 +599,7 @@ private fun ParticipantAvatarTile(
         }
         Spacer(Modifier.height(4.dp))
         UserAvatar(
-            name = participant.name,
+            name = resolvedName,
             email = participant.email,
             photo = photo,
             size = 44.dp,
@@ -527,7 +612,7 @@ private fun ParticipantAvatarTile(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            text = formatShortPersonName(participant.name, participant.email),
+            text = formatShortPersonName(resolvedName, participant.email),
             style = MaterialTheme.typography.labelSmall,
             color = nameColor,
             textAlign = TextAlign.Center,
@@ -543,6 +628,7 @@ private fun PersonInfoDialog(
     participant: EmailParticipant,
     photo: ImageBitmap?,
     profile: PersonProfile?,
+    knownNames: Map<String, String>,
     isLoadingProfile: Boolean,
     onRequestProfile: () -> Unit,
     onRequestAvatar: (String) -> Unit,
@@ -554,8 +640,7 @@ private fun PersonInfoDialog(
         onRequestProfile()
     }
 
-    val fullName = profile?.displayName?.takeIf { it.isNotBlank() }
-        ?: participant.name.ifBlank { participant.email }
+    val fullName = resolveDisplayName(participant.name, participant.email, profile, knownNames)
     val primaryEmail = profile?.email?.takeIf { it.isNotBlank() } ?: participant.email
 
     AlertDialog(

@@ -2,6 +2,7 @@ package ru.nstu.mail.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,7 +16,10 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -53,6 +57,8 @@ fun LoginScreen(
     isLoading: Boolean,
     errorMessage: String?,
     suggestOwaFallback: Boolean,
+    themeMode: AppThemeMode,
+    onSetThemeMode: (AppThemeMode) -> Unit,
     onLogin: (email: String, password: String, serverUrl: String) -> Unit,
     onOpenOwa: (email: String, password: String, serverUrl: String) -> Unit
 ) {
@@ -65,15 +71,42 @@ fun LoginScreen(
     var showServerSettings by rememberSaveable { mutableStateOf(false) }
 
     Scaffold { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 24.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            IconButton(
+                onClick = {
+                    val next = when (themeMode) {
+                        AppThemeMode.SYSTEM -> AppThemeMode.DARK
+                        AppThemeMode.DARK -> AppThemeMode.LIGHT
+                        AppThemeMode.LIGHT -> AppThemeMode.SYSTEM
+                    }
+                    onSetThemeMode(next)
+                },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+            ) {
+                Icon(
+                    imageVector = when (themeMode) {
+                        AppThemeMode.DARK -> Icons.Default.DarkMode
+                        AppThemeMode.LIGHT -> Icons.Default.LightMode
+                        AppThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
+                    },
+                    contentDescription = "Тема: ${themeMode.labelRu}"
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
             Icon(
                 imageVector = Icons.Default.Email,
                 contentDescription = null,
@@ -221,6 +254,7 @@ fun LoginScreen(
                     .height(48.dp)
             ) {
                 Text("Войти через OWA (WebView)")
+            }
             }
         }
     }

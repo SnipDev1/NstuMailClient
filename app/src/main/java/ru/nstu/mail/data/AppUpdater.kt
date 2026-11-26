@@ -5,11 +5,17 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import ru.nstu.mail.BuildConfig
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+
+enum class UpdateChannel(val labelRu: String, val descriptionRu: String) {
+    STABLE("Актуальная", "Стабильные релизы (ветка main)"),
+    TEST("Тестовая", "Ранние тестовые сборки (ветка test)")
+}
 
 data class AppUpdateInfo(
     val versionName: String,
@@ -17,7 +23,8 @@ data class AppUpdateInfo(
     val releaseNotes: String,
     val apkUrl: String,
     val apkName: String,
-    val apkSizeBytes: Long
+    val apkSizeBytes: Long,
+    val isPrerelease: Boolean = false
 )
 
 class AppUpdater(
@@ -27,9 +34,14 @@ class AppUpdater(
 ) {
 
     suspend fun checkLatestRelease(
-        currentVersion: String = BuildConfig.VERSION_NAME
+        currentVersion: String = BuildConfig.VERSION_NAME,
+        channel: UpdateChannel = UpdateChannel.STABLE
     ): AppUpdateInfo? = withContext(Dispatchers.IO) {
-        val url = "${apiBaseUrl.trimEnd('/')}/repos/$repo/releases/latest"
+        val base = apiBaseUrl.trimEnd('/')
+        val url = when (channel) {
+            UpdateChannel.STABLE -> "$base/repos/$repo/releases/latest"
+            UpdateChannel.TEST -> "$base/repos/$repo/releases?per_page=20"
+        }
         val request = Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github+json")
@@ -44,7 +56,10 @@ class AppUpdater(
             }
             val body = resp.body?.string().orEmpty()
             if (body.isBlank()) return@withContext null
-            parseReleaseJson(body, currentVersion)
+            when (channel) {
+                UpdateChannel.STABLE -> parseReleaseJson(body, currentVersion, allowPrerelease = false)
+                UpdateChannel.TEST -> parseReleaseListJson(body, currentVersion, channel)
+            }
         }
     }
 
@@ -128,34 +143,89 @@ class AppUpdater(
             return host == "github.com" || host.endsWith(".githubusercontent.com")
         }
 
-        fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
-            val remoteParts = parseVersionParts(remoteTag) ?: return false
-            val currentParts = parseVersionParts(currentVersion) ?: return false
-            val maxLen = maxOf(remoteParts.size, currentParts.size)
-            for (i in 0 until maxLen) {
-                val r = remoteParts.getOrElse(i) { 0 }
-                val c = currentParts.getOrElse(i) { 0 }
-                if (r != c) return r > c
+        private data class SemVer(val core: List<Int>, val pre: List<String>)
+
+        fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean =
+            compareVersions(remoteTag, currentVersion) > 0
+
+        private fun compareVersions(a: String, b: String): Int {
+            val va = parseSemVer(a) ?: return -1
+            val vb = parseSemVer(b) ?: return 0
+            val maxCore = maxOf(va.core.size, vb.core.size)
+            for (i in 0 until maxCore) {
+                val r = va.core.getOrElse(i) { 0 }
+                val c = vb.core.getOrElse(i) { 0 }
+                if (r != c) return r.compareTo(c)
             }
-            return false
+            if (va.pre.isEmpty() && vb.pre.isEmpty()) return 0
+            if (va.pre.isEmpty()) return 1
+            if (vb.pre.isEmpty()) return -1
+
+            val maxPre = maxOf(va.pre.size, vb.pre.size)
+            for (i in 0 until maxPre) {
+                if (i >= va.pre.size) return -1
+                if (i >= vb.pre.size) return 1
+                val pa = va.pre[i]
+                val pb = vb.pre[i]
+                val na = pa.toIntOrNull()
+                val nb = pb.toIntOrNull()
+                val cmp = when {
+                    na != null && nb != null -> na.compareTo(nb)
+                    na != null -> -1
+                    nb != null -> 1
+                    else -> pa.compareTo(pb)
+                }
+                if (cmp != 0) return cmp
+            }
+            return 0
         }
 
-        private fun parseVersionParts(raw: String): List<Int>? {
-            val core = raw.trim()
-                .removePrefix("v")
-                .removePrefix("V")
-                .substringBefore('-')
-                .substringBefore('+')
-                .trim()
-            if (core.isEmpty()) return null
-            val parts = core.split('.').map { it.toIntOrNull() ?: return null }
-            return if (parts.isEmpty()) null else parts
+        private fun parseSemVer(raw: String): SemVer? {
+            val trimmed = raw.trim().removePrefix("v").removePrefix("V").substringBefore('+').trim()
+            if (trimmed.isEmpty()) return null
+            val coreStr = trimmed.substringBefore('-').trim()
+            if (coreStr.isEmpty()) return null
+            val core = coreStr.split('.').map { it.toIntOrNull() ?: return null }
+            val pre = if ('-' in trimmed) {
+                trimmed.substringAfter('-').split('.').filter { it.isNotBlank() }
+            } else {
+                emptyList()
+            }
+            return SemVer(core = core, pre = pre)
         }
 
-        fun parseReleaseJson(json: String, currentVersion: String): AppUpdateInfo? {
-            val obj = JSONObject(json)
+        fun parseReleaseJson(
+            json: String,
+            currentVersion: String,
+            allowPrerelease: Boolean = false
+        ): AppUpdateInfo? = parseReleaseObject(JSONObject(json), currentVersion, allowPrerelease)
+
+        fun parseReleaseListJson(
+            json: String,
+            currentVersion: String,
+            channel: UpdateChannel
+        ): AppUpdateInfo? {
+            val arr = JSONArray(json)
+            val allowPre = channel == UpdateChannel.TEST
+            var best: AppUpdateInfo? = null
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val candidate = parseReleaseObject(obj, currentVersion, allowPre) ?: continue
+                if (best == null || compareVersions(candidate.tagName, best.tagName) > 0) {
+                    best = candidate
+                }
+            }
+            return best
+        }
+
+        private fun parseReleaseObject(
+            obj: JSONObject,
+            currentVersion: String,
+            allowPrerelease: Boolean
+        ): AppUpdateInfo? {
             if (obj.optBoolean("draft", false)) return null
-            if (obj.optBoolean("prerelease", false)) return null
+            val isPre = obj.optBoolean("prerelease", false)
+            if (isPre && !allowPrerelease) return null
 
             val tagName = obj.optString("tag_name", "").trim()
             if (tagName.isEmpty() || !isNewerVersion(tagName, currentVersion)) return null
@@ -183,7 +253,8 @@ class AppUpdater(
                 releaseNotes = obj.optString("body", "").trim(),
                 apkUrl = chosen.second,
                 apkName = chosen.first,
-                apkSizeBytes = chosen.third
+                apkSizeBytes = chosen.third,
+                isPrerelease = isPre
             )
         }
     }

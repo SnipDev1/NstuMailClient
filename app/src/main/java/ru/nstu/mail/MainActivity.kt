@@ -1,13 +1,26 @@
 package ru.nstu.mail
 
+import android.Manifest
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import ru.nstu.mail.notify.EXTRA_MESSAGE_ID
+import ru.nstu.mail.notify.MailNotificationHelper
+import ru.nstu.mail.ui.AppThemeMode
 import ru.nstu.mail.ui.CalendarScreen
 import ru.nstu.mail.ui.ComposeScreen
 import ru.nstu.mail.ui.ContactsScreen
@@ -18,20 +31,72 @@ import ru.nstu.mail.ui.MessageDetailScreen
 import ru.nstu.mail.ui.NstuMailTheme
 import ru.nstu.mail.ui.OwaWebViewScreen
 import ru.nstu.mail.ui.Screen
+import ru.nstu.mail.ui.SettingsScreen
 import ru.nstu.mail.ui.UpdateDialog
 
 class MainActivity : ComponentActivity() {
+    private val pendingMessageId = MutableStateFlow<String?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(EXTRA_MESSAGE_ID)?.takeIf { it.isNotBlank() }?.let {
+            pendingMessageId.value = it
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        intent?.getStringExtra(EXTRA_MESSAGE_ID)?.takeIf { it.isNotBlank() }?.let {
+            pendingMessageId.value = it
+        }
         enableEdgeToEdge()
         setContent {
-            NstuMailTheme {
-                val vm: MailViewModel = viewModel()
+            val vm: MailViewModel = viewModel()
+            val themeMode by vm.themeMode.collectAsState()
+            val updateChannel by vm.updateChannel.collectAsState()
+            val notificationsEnabled by vm.notificationsEnabled.collectAsState()
+            val notificationIntervalMinutes by vm.notificationIntervalMinutes.collectAsState()
+            val pendingId by pendingMessageId.collectAsState()
+
+            val darkTheme = when (themeMode) {
+                AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+                AppThemeMode.LIGHT -> false
+                AppThemeMode.DARK -> true
+            }
+            DisposableEffect(darkTheme) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    ) { darkTheme },
+                    navigationBarStyle = SystemBarStyle.auto(
+                        android.graphics.Color.argb(0xe6, 0xFF, 0xFF, 0xFF),
+                        android.graphics.Color.argb(0x80, 0x1b, 0x1b, 0x1b)
+                    ) { darkTheme }
+                )
+                onDispose {}
+            }
+
+            NstuMailTheme(darkTheme = darkTheme) {
                 val state by vm.state.collectAsState()
                 val avatars by vm.avatars.collectAsState()
                 val personProfiles by vm.personProfiles.collectAsState()
+                val knownNames by vm.knownNames.collectAsState()
                 val loadingProfiles by vm.loadingProfiles.collectAsState()
                 val context = LocalContext.current
+
+                val notifPermLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    vm.onNotificationPermissionResult(granted)
+                }
+
+                LaunchedEffect(pendingId) {
+                    val id = pendingId ?: return@LaunchedEffect
+                    vm.openMessageById(id)
+                    pendingMessageId.value = null
+                }
 
                 state.availableUpdate?.let { update ->
                     UpdateDialog(
@@ -50,40 +115,57 @@ class MainActivity : ComponentActivity() {
                         isLoading = state.isLoading,
                         errorMessage = state.errorMessage,
                         suggestOwaFallback = state.suggestOwaFallback,
+                        themeMode = themeMode,
+                        onSetThemeMode = vm::setThemeMode,
                         onLogin = vm::login,
                         onOpenOwa = vm::openOwaFallback
                     )
 
-                    Screen.MailList -> MailListScreen(
-                        state = state,
-                        avatars = avatars,
-                        onRequestAvatar = vm::requestAvatar,
-                        onSelectFolder = vm::selectFolder,
-                        onSelectFilter = vm::setFilter,
-                        onRefresh = vm::refresh,
-                        onLoadMore = vm::loadMore,
-                        onSearch = vm::search,
-                        onToggleSearchAllFolders = vm::setSearchAllFolders,
-                        onOpenMessage = vm::openMessage,
-                        onToggleSelect = vm::toggleSelection,
-                        onClearSelection = vm::clearSelection,
-                        onToggleFlag = vm::toggleFlag,
-                        onBatchSetRead = vm::batchSetRead,
-                        onBatchMove = vm::batchMove,
-                        onBatchDelete = vm::batchDelete,
-                        onCreateFolder = vm::createFolder,
-                        onRenameFolder = vm::renameFolder,
-                        onDeleteFolder = vm::deleteFolder,
-                        onEmptyCurrentFolder = vm::emptyCurrentFolder,
-                        onMarkAllRead = vm::markAllReadInCurrentFolder,
-                        onCompose = { vm.openCompose() },
-                        onOpenContacts = vm::openContacts,
-                        onOpenCalendar = vm::openCalendar,
-                        onOpenOwa = vm::openOwaFromMailList,
-                        onCheckUpdates = { vm.checkForUpdates(manual = true) },
-                        onLogout = vm::logout,
-                        onClearToast = vm::clearToast
-                    )
+                    Screen.MailList -> {
+                        LaunchedEffect(Unit) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                notificationsEnabled &&
+                                !MailNotificationHelper.hasSystemPermission(context) &&
+                                !MailNotificationHelper.wasPermissionAsked(context)
+                            ) {
+                                MailNotificationHelper.markPermissionAsked(context)
+                                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        }
+                        MailListScreen(
+                            state = state,
+                            avatars = avatars,
+                            personProfiles = personProfiles,
+                            knownNames = knownNames,
+                            onRequestAvatar = vm::requestAvatar,
+                            onSelectFolder = vm::selectFolder,
+                            onSelectFilter = vm::setFilter,
+                            onRefresh = vm::refresh,
+                            onLoadMore = vm::loadMore,
+                            onSearch = vm::search,
+                            onToggleSearchAllFolders = vm::setSearchAllFolders,
+                            onOpenMessage = vm::openMessage,
+                            onToggleSelect = vm::toggleSelection,
+                            onClearSelection = vm::clearSelection,
+                            onToggleFlag = vm::toggleFlag,
+                            onBatchSetRead = vm::batchSetRead,
+                            onBatchMove = vm::batchMove,
+                            onBatchDelete = vm::batchDelete,
+                            onCreateFolder = vm::createFolder,
+                            onRenameFolder = vm::renameFolder,
+                            onDeleteFolder = vm::deleteFolder,
+                            onEmptyCurrentFolder = vm::emptyCurrentFolder,
+                            onMarkAllRead = vm::markAllReadInCurrentFolder,
+                            onCompose = { vm.openCompose() },
+                            onOpenContacts = vm::openContacts,
+                            onOpenCalendar = vm::openCalendar,
+                            onOpenOwa = vm::openOwaFromMailList,
+                            onOpenSettings = vm::openSettings,
+                            onCheckUpdates = { vm.checkForUpdates(manual = true) },
+                            onLogout = vm::logout,
+                            onClearToast = vm::clearToast
+                        )
+                    }
 
                     Screen.MessageDetail -> {
                         val detail = state.selectedMessage
@@ -94,13 +176,17 @@ class MainActivity : ComponentActivity() {
                                 currentFolder = state.currentFolder,
                                 avatars = avatars,
                                 personProfiles = personProfiles,
+                                knownNames = knownNames,
                                 loadingProfiles = loadingProfiles,
+                                darkTheme = darkTheme,
                                 isDownloadingAttachment = state.isDownloadingAttachment,
                                 toastMessage = state.toastMessage,
                                 onBack = vm::backToMailList,
                                 onRequestAvatar = vm::requestAvatar,
                                 onRequestPersonProfile = vm::requestPersonProfile,
-                                onComposeTo = { email -> vm.openCompose(prefillTo = email) },
+                                onComposeTo = { email, name ->
+                                    vm.openCompose(prefillTo = email, prefillName = name)
+                                },
                                 onToggleRead = vm::toggleRead,
                                 onToggleFlag = vm::toggleFlagDetail,
                                 onReply = { vm.openCompose(replyTo = it) },
@@ -127,6 +213,7 @@ class MainActivity : ComponentActivity() {
                         directorySuggestions = state.directorySuggestions,
                         avatars = avatars,
                         personProfiles = personProfiles,
+                        knownNames = knownNames,
                         isSending = state.isSending,
                         errorMessage = state.errorMessage,
                         onBack = vm::backToMailList,
@@ -147,7 +234,9 @@ class MainActivity : ComponentActivity() {
                         onSearchDirectory = vm::searchDirectory,
                         onRequestAvatar = vm::requestAvatar,
                         onAddContact = vm::addContact,
-                        onComposeTo = { email -> vm.openCompose(prefillTo = email) },
+                        onComposeTo = { email, name ->
+                            vm.openCompose(prefillTo = email, prefillName = name)
+                        },
                         onClearToast = vm::clearToast
                     )
 
@@ -159,6 +248,24 @@ class MainActivity : ComponentActivity() {
                         onRefresh = vm::openCalendar,
                         onCreateEvent = vm::createCalendarEvent,
                         onDeleteEvent = vm::deleteCalendarEvent,
+                        onClearToast = vm::clearToast
+                    )
+
+                    Screen.Settings -> SettingsScreen(
+                        themeMode = themeMode,
+                        notificationsEnabled = notificationsEnabled,
+                        notificationIntervalMinutes = notificationIntervalMinutes,
+                        updateChannel = updateChannel,
+                        isCheckingUpdate = state.isCheckingUpdate,
+                        toastMessage = state.toastMessage,
+                        onBack = vm::backToMailList,
+                        onSetThemeMode = vm::setThemeMode,
+                        onSetNotificationsEnabled = vm::setNotificationsEnabled,
+                        onSetNotificationInterval = vm::setNotificationInterval,
+                        onCheckNewMailNow = vm::checkNewMailNow,
+                        onNotificationPermissionResult = vm::onNotificationPermissionResult,
+                        onSetUpdateChannel = vm::setUpdateChannel,
+                        onCheckUpdates = { vm.checkForUpdates(manual = true) },
                         onClearToast = vm::clearToast
                     )
 

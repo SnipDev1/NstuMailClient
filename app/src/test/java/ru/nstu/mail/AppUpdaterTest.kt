@@ -10,6 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.nstu.mail.data.AppUpdater
+import ru.nstu.mail.data.UpdateChannel
 
 class AppUpdaterTest {
 
@@ -18,6 +19,11 @@ class AppUpdaterTest {
         assertTrue(AppUpdater.isNewerVersion("v1.0.1", "1.0.0"))
         assertTrue(AppUpdater.isNewerVersion("1.10.0", "1.2.0"))
         assertTrue(AppUpdater.isNewerVersion("v2.0.0-rc1", "1.9.9"))
+        assertTrue(AppUpdater.isNewerVersion("v1.0.6-test.1", "1.0.5"))
+        assertTrue(AppUpdater.isNewerVersion("v1.0.6-test.2", "1.0.6-test.1"))
+        assertTrue(AppUpdater.isNewerVersion("v1.0.6-test.10", "1.0.6-test.2"))
+        assertTrue(AppUpdater.isNewerVersion("v1.0.6", "1.0.6-test.2"))
+        assertFalse(AppUpdater.isNewerVersion("v1.0.6-test.1", "1.0.6"))
         assertFalse(AppUpdater.isNewerVersion("v1.0.0", "1.0.0"))
         assertFalse(AppUpdater.isNewerVersion("0.9.9", "1.0.0"))
         assertFalse(AppUpdater.isNewerVersion("invalid", "1.0.0"))
@@ -116,6 +122,73 @@ class AppUpdaterTest {
             assertEquals("/repos/SnipDev1/NstuMailApk/releases/latest", req.path)
 
             assertNull(updater.checkLatestRelease("1.0.0"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `test channel queries releases list and selects highest prerelease`() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val releasesJson = """
+                [
+                  {
+                    "tag_name": "v1.0.6-test.2",
+                    "draft": false,
+                    "prerelease": true,
+                    "body": "Test 2",
+                    "assets": [
+                      {
+                        "name": "NstuMail-v1.0.6-test.2.apk",
+                        "size": 2048,
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.2/NstuMail-v1.0.6-test.2.apk"
+                      }
+                    ]
+                  },
+                  {
+                    "tag_name": "v1.0.6-test.1",
+                    "draft": false,
+                    "prerelease": true,
+                    "body": "Test 1",
+                    "assets": [
+                      {
+                        "name": "NstuMail-v1.0.6-test.1.apk",
+                        "size": 1024,
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.1/NstuMail-v1.0.6-test.1.apk"
+                      }
+                    ]
+                  },
+                  {
+                    "tag_name": "v1.0.7-test.1",
+                    "draft": true,
+                    "prerelease": true,
+                    "body": "Draft",
+                    "assets": [
+                      {
+                        "name": "NstuMail-v1.0.7-test.1.apk",
+                        "size": 1024,
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.7-test.1/NstuMail-v1.0.7-test.1.apk"
+                      }
+                    ]
+                  }
+                ]
+            """.trimIndent()
+            server.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson))
+
+            val updater = AppUpdater(
+                repo = "SnipDev1/NstuMailApk",
+                apiBaseUrl = server.url("/").toString().trimEnd('/')
+            )
+
+            val found = updater.checkLatestRelease("1.0.5", UpdateChannel.TEST)
+            assertNotNull(found)
+            assertEquals("v1.0.6-test.2", found!!.tagName)
+            assertTrue(found.isPrerelease)
+
+            val req = server.takeRequest()
+            assertEquals("/repos/SnipDev1/NstuMailApk/releases?per_page=20", req.path)
         } finally {
             server.shutdown()
         }

@@ -362,6 +362,43 @@ object EwsXml {
         )
     }
 
+    fun buildFindInboxUnreadRequest(pageSize: Int = 15): String {
+        return wrapSoap(
+            """
+            <m:FindItem Traversal="Shallow">
+              <m:ItemShape>
+                <t:BaseShape>IdOnly</t:BaseShape>
+                <t:AdditionalProperties>
+                  <t:FieldURI FieldURI="item:Subject"/>
+                  <t:FieldURI FieldURI="item:DateTimeReceived"/>
+                  <t:FieldURI FieldURI="item:HasAttachments"/>
+                  <t:FieldURI FieldURI="item:Preview"/>
+                  <t:FieldURI FieldURI="item:Importance"/>
+                  <t:FieldURI FieldURI="item:Flag"/>
+                  <t:FieldURI FieldURI="message:From"/>
+                  <t:FieldURI FieldURI="message:IsRead"/>
+                </t:AdditionalProperties>
+              </m:ItemShape>
+              <m:IndexedPageItemView MaxEntriesReturned="$pageSize" Offset="0" BasePoint="Beginning"/>
+              <m:Restriction>
+                <t:IsEqualTo>
+                  <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:FieldURIOrConstant><t:Constant Value="false"/></t:FieldURIOrConstant>
+                </t:IsEqualTo>
+              </m:Restriction>
+              <m:SortOrder>
+                <t:FieldOrder Order="Descending">
+                  <t:FieldURI FieldURI="item:DateTimeReceived"/>
+                </t:FieldOrder>
+              </m:SortOrder>
+              <m:ParentFolderIds>
+                <t:DistinguishedFolderId Id="inbox"/>
+              </m:ParentFolderIds>
+            </m:FindItem>
+            """.trimIndent()
+        )
+    }
+
     fun buildGetItemRequest(itemId: String): String {
         return wrapSoap(
             """
@@ -741,6 +778,64 @@ object EwsXml {
             )
         }
         return list
+    }
+
+    fun buildFindRecipientCacheRequest(maxEntries: Int = 100): String {
+        return wrapSoap(
+            """
+            <m:FindPeople>
+              <m:IndexedPageItemView MaxEntriesReturned="$maxEntries" Offset="0" BasePoint="Beginning"/>
+              <m:ParentFolderId>
+                <t:DistinguishedFolderId Id="recipientcache"/>
+              </m:ParentFolderId>
+            </m:FindPeople>
+            """.trimIndent()
+        )
+    }
+
+    fun parseFindPeopleResponse(xml: String): List<ContactEntry> {
+        val doc = parseDocument(xml)
+        val faults = doc.getElementsByTagNameNS(SOAP_ENV, "Fault")
+        if (faults.length > 0) checkSoapErrors(doc)
+
+        val resp = doc.getElementsByTagNameNS(EWS_MESSAGES, "FindPeopleResponse").item(0) as? Element
+        if (resp != null && resp.getAttribute("ResponseClass").equals("Error", true)) {
+            return emptyList()
+        }
+
+        val personas = doc.getElementsByTagNameNS(EWS_TYPES, "Persona")
+        val list = mutableListOf<ContactEntry>()
+        for (i in 0 until personas.length) {
+            val persona = personas.item(i) as? Element ?: continue
+            val displayName = persona.firstChildText(EWS_TYPES, "DisplayName")
+            val emailNodes = persona.getElementsByTagNameNS(EWS_TYPES, "EmailAddress")
+            var email = ""
+            var nestedName = ""
+            for (j in 0 until emailNodes.length) {
+                val el = emailNodes.item(j) as? Element ?: continue
+                val hasElementChildren = (0 until el.childNodes.length)
+                    .any { el.childNodes.item(it) is Element }
+                if (hasElementChildren) {
+                    if (nestedName.isBlank()) {
+                        nestedName = el.firstChildText(EWS_TYPES, "Name")
+                    }
+                } else {
+                    val candidate = el.textContent?.trim().orEmpty()
+                    if ('@' in candidate) {
+                        email = candidate
+                        break
+                    }
+                }
+            }
+            if (email.isBlank()) continue
+            val finalName = displayName.ifBlank { nestedName.ifBlank { email } }
+            list += ContactEntry(
+                name = finalName,
+                email = email,
+                isFromDirectory = true
+            )
+        }
+        return list.distinctBy { it.email.lowercase() }
     }
 
     fun buildFindContactsRequest(): String {

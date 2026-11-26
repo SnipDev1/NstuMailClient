@@ -13,12 +13,14 @@ RELEASE_ENV="$ROOT_DIR/.release.env"
 usage() {
   cat <<'EOF'
 Использование:
-  ./scripts/release.sh <version> [release_notes] [--dry-run]
+  ./scripts/release.sh <version> [release_notes] [--channel test|stable] [--stable] [--dry-run]
 
 Примеры:
-  ./scripts/release.sh 1.0.1 "Исправления и улучшения"
-  ./scripts/release.sh 1.0.1 --dry-run
+  ./scripts/release.sh 1.0.6-test.1 "Тестовая сборка"
+  ./scripts/release.sh 1.0.6 "Стабильный релиз" --stable
+  ./scripts/release.sh 1.0.6 --dry-run
 
+По умолчанию канал = test (ветка test, GitHub Pre-release).
 Переменные окружения (можно положить в .release.env в корне проекта):
   GITHUB_TOKEN       Personal Access Token с правами Contents: Read & Write (или public_repo)
   KEYSTORE_FILE      Путь к .jks/.keystore (если не используется keystore.properties)
@@ -29,18 +31,33 @@ EOF
 }
 
 DRY_RUN=0
+CHANNEL="test"
 ARGS=()
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     -h|--help)
       usage
       exit 0
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --stable)
+      CHANNEL="stable"
+      shift
+      ;;
+    --channel)
+      CHANNEL="${2:-}"
+      shift 2
+      ;;
+    --channel=*)
+      CHANNEL="${1#*=}"
+      shift
       ;;
     *)
-      ARGS+=("$arg")
+      ARGS+=("$1")
+      shift
       ;;
   esac
 done
@@ -52,12 +69,33 @@ fi
 
 VERSION="${ARGS[0]#v}"
 NOTES="${ARGS[1]:-Релиз v$VERSION}"
-TAG="v$VERSION"
 
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Ошибка: версия должна быть в формате X.Y.Z (например, 1.0.1), получено: ${ARGS[0]}" >&2
+if [ "$CHANNEL" != "test" ] && [ "$CHANNEL" != "stable" ]; then
+  echo "Ошибка: --channel должен быть test или stable, получено: $CHANNEL" >&2
   exit 1
 fi
+
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+  echo "Ошибка: версия должна быть в формате X.Y.Z или X.Y.Z-suffix, получено: ${ARGS[0]}" >&2
+  exit 1
+fi
+
+if [ "$CHANNEL" = "test" ] && [[ "$VERSION" != *-* ]]; then
+  VERSION="${VERSION}-test.1"
+fi
+if [ "$CHANNEL" = "stable" ] && [[ "$VERSION" == *-* ]]; then
+  echo "Ошибка: стабильный релиз (--stable) не должен содержать суффикс '$VERSION'." >&2
+  exit 1
+fi
+
+if [ "$CHANNEL" = "test" ]; then
+  TARGET_BRANCH="test"
+  PRERELEASE="true"
+else
+  TARGET_BRANCH="main"
+  PRERELEASE="false"
+fi
+TAG="v$VERSION"
 
 if [ -f "$RELEASE_ENV" ]; then
   set -a
@@ -215,18 +253,19 @@ git commit -m "release: $TAG"
 COMMITTED=1
 git tag -a "$TAG" -m "Release $TAG"
 
-echo "=== Отправка коммита и тега $TAG в origin ==="
-git_push origin HEAD:main
+echo "=== Отправка коммита и тега $TAG в origin/$TARGET_BRANCH ==="
+git_push origin "HEAD:$TARGET_BRANCH"
 git_push origin "$TAG"
 
-echo "=== Создание GitHub Release $TAG и загрузка APK ==="
+echo "=== Создание GitHub Release $TAG (branch=$TARGET_BRANCH, prerelease=$PRERELEASE) и загрузка APK ==="
 if [ "$USE_GH" -eq 1 ]; then
-  gh release create "$TAG" "$OUT_APK" \
-    --repo "$REPO" \
-    --title "NstuMail $TAG" \
-    --notes "$NOTES"
+  GH_ARGS=(release create "$TAG" "$OUT_APK" --repo "$REPO" --title "NstuMail $TAG" --notes "$NOTES")
+  if [ "$PRERELEASE" = "true" ]; then
+    GH_ARGS+=(--prerelease)
+  fi
+  gh "${GH_ARGS[@]}"
 else
-  CREATE_RESP="$(python3 - "$REPO" "$TAG" "$NOTES" <<'PY' | curl -fsSL -X POST \
+  CREATE_RESP="$(python3 - "$REPO" "$TAG" "$NOTES" "$TARGET_BRANCH" "$PRERELEASE" <<'PY' | curl -fsSL -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $GITHUB_TOKEN" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -234,14 +273,14 @@ else
     --data-binary @- \
     "https://api.github.com/repos/$REPO/releases"
 import json, sys
-repo, tag, notes = sys.argv[1], sys.argv[2], sys.argv[3]
+repo, tag, notes, branch, pre = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "true"
 print(json.dumps({
     "tag_name": tag,
-    "target_commitish": "main",
+    "target_commitish": branch,
     "name": f"NstuMail {tag}",
     "body": notes,
     "draft": False,
-    "prerelease": False,
+    "prerelease": pre,
 }))
 PY
 )"

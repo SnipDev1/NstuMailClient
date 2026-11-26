@@ -103,6 +103,11 @@ class EwsClient(private val credentials: Credentials) {
         EwsXml.parseFindItemsResponse(xml)
     }
 
+    suspend fun listInboxUnread(pageSize: Int = 15): List<EmailSummary> = withContext(Dispatchers.IO) {
+        val xml = postSoapWithAuthFallback(EwsXml.buildFindInboxUnreadRequest(pageSize))
+        EwsXml.parseFindItemsResponse(xml).first
+    }
+
     suspend fun getMessage(itemId: String): EmailDetail = withContext(Dispatchers.IO) {
         val xml = postSoapWithAuthFallback(EwsXml.buildGetItemRequest(itemId))
         EwsXml.parseGetItemResponse(xml)
@@ -222,6 +227,11 @@ class EwsClient(private val credentials: Credentials) {
         if (query.trim().length < 2) return@withContext emptyList()
         val xml = postSoapWithAuthFallback(EwsXml.buildResolveNamesRequest(query))
         EwsXml.parseResolveNamesResponse(xml)
+    }
+
+    suspend fun getRecipientCache(maxEntries: Int = 100): List<ContactEntry> = withContext(Dispatchers.IO) {
+        val xml = postSoapWithAuthFallback(EwsXml.buildFindRecipientCacheRequest(maxEntries))
+        EwsXml.parseFindPeopleResponse(xml)
     }
 
     suspend fun resolvePersonProfile(email: String, name: String = ""): PersonProfile? =

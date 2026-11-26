@@ -60,7 +60,7 @@ fun ContactsScreen(
     onSearchDirectory: (String) -> Unit,
     onRequestAvatar: (String) -> Unit,
     onAddContact: (name: String, email: String) -> Unit,
-    onComposeTo: (email: String) -> Unit,
+    onComposeTo: (email: String, name: String) -> Unit,
     onClearToast: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -180,7 +180,7 @@ fun ContactsScreen(
                             contact = c,
                             photo = avatars[c.email.trim().lowercase()],
                             onRequestAvatar = onRequestAvatar,
-                            onClick = { onComposeTo(c.email) }
+                            onClick = { onComposeTo(c.email, c.name) }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                     }
@@ -216,7 +216,7 @@ fun ContactsScreen(
                             photo = avatars[c.email.trim().lowercase()],
                             onRequestAvatar = onRequestAvatar,
                             onClick = {
-                                if (c.email.isNotBlank()) onComposeTo(c.email)
+                                if (c.email.isNotBlank()) onComposeTo(c.email, c.name)
                             }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))

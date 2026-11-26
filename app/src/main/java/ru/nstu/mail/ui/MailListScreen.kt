@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -99,6 +100,7 @@ import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.EmailSummary
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -106,6 +108,8 @@ import ru.nstu.mail.data.SystemFolderKind
 fun MailListScreen(
     state: MailUiState,
     avatars: Map<String, ImageBitmap?>,
+    personProfiles: Map<String, PersonProfile?>,
+    knownNames: Map<String, String>,
     onRequestAvatar: (String) -> Unit,
     onSelectFolder: (MailFolder) -> Unit,
     onSelectFilter: (MailFilter) -> Unit,
@@ -129,6 +133,7 @@ fun MailListScreen(
     onOpenContacts: () -> Unit,
     onOpenCalendar: () -> Unit,
     onOpenOwa: () -> Unit,
+    onOpenSettings: () -> Unit,
     onCheckUpdates: () -> Unit,
     onLogout: () -> Unit,
     onClearToast: () -> Unit
@@ -245,10 +250,17 @@ fun MailListScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         val userEmail = state.credentials?.email.orEmpty()
-                        UserAvatar(
-                            name = userEmail.substringBefore('@'),
+                        val userKey = userEmail.trim().lowercase()
+                        val userDisplayName = resolveDisplayName(
+                            name = "",
                             email = userEmail,
-                            photo = avatars[userEmail.trim().lowercase()],
+                            profile = personProfiles[userKey],
+                            knownNames = knownNames
+                        )
+                        UserAvatar(
+                            name = userDisplayName,
+                            email = userEmail,
+                            photo = avatars[userKey],
                             size = 46.dp,
                             onRequestLoad = onRequestAvatar
                         )
@@ -260,7 +272,7 @@ fun MailListScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = userEmail,
+                                text = userDisplayName,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -382,6 +394,17 @@ fun MailListScreen(
                         onClick = {
                             scope.launch { drawerState.close() }
                             onOpenOwa()
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+
+                    NavigationDrawerItem(
+                        label = { Text("Настройки") },
+                        selected = false,
+                        icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            onOpenSettings()
                         },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
@@ -604,9 +627,17 @@ fun MailListScreen(
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(state.messages, key = { it.id }) { item ->
+                                val senderKey = item.senderEmail.trim().lowercase()
+                                val resolvedSenderName = resolveDisplayName(
+                                    name = item.senderName,
+                                    email = item.senderEmail,
+                                    profile = personProfiles[senderKey],
+                                    knownNames = knownNames
+                                )
                                 EmailRow(
                                     item = item,
-                                    photo = avatars[item.senderEmail.trim().lowercase()],
+                                    displaySenderName = resolvedSenderName,
+                                    photo = avatars[senderKey],
                                     selected = item.id in state.selectedIds,
                                     onRequestAvatar = onRequestAvatar,
                                     onClick = { onOpenMessage(item) },
@@ -716,6 +747,7 @@ private fun DrawerFolderItem(
 @Composable
 private fun EmailRow(
     item: EmailSummary,
+    displaySenderName: String,
     photo: ImageBitmap?,
     selected: Boolean,
     onRequestAvatar: (String) -> Unit,
@@ -743,7 +775,7 @@ private fun EmailRow(
         verticalAlignment = Alignment.Top
     ) {
         UserAvatar(
-            name = item.senderName,
+            name = displaySenderName,
             email = item.senderEmail,
             photo = photo,
             size = 40.dp,
@@ -779,7 +811,7 @@ private fun EmailRow(
                     Spacer(Modifier.width(2.dp))
                 }
                 Text(
-                    text = item.senderName,
+                    text = displaySenderName,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = weight,
                     maxLines = 1,

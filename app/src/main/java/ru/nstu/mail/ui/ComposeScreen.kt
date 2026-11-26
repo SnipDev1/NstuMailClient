@@ -123,6 +123,7 @@ fun ComposeScreen(
     directorySuggestions: List<ContactEntry>,
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
+    knownNames: Map<String, String>,
     isSending: Boolean,
     errorMessage: String?,
     onBack: () -> Unit,
@@ -471,6 +472,7 @@ fun ComposeScreen(
                     editingText = editingText,
                     avatars = avatars,
                     personProfiles = personProfiles,
+                    knownNames = knownNames,
                     enabled = !isSending,
                     suggestions = if (activeField == field) directorySuggestions else emptyList(),
                     headerExtra = trailingHeaderActions,
@@ -651,6 +653,7 @@ private fun RecipientStripSection(
     editingText: String,
     avatars: Map<String, ImageBitmap?>,
     personProfiles: Map<String, PersonProfile?>,
+    knownNames: Map<String, String>,
     enabled: Boolean,
     suggestions: List<ContactEntry>,
     headerExtra: @Composable () -> Unit,
@@ -742,6 +745,7 @@ private fun RecipientStripSection(
                         role = role,
                         photo = avatars[rec.email.trim().lowercase()],
                         profile = personProfiles[rec.email.trim().lowercase()],
+                        knownNames = knownNames,
                         enabled = enabled,
                         onRequestAvatar = onRequestAvatar,
                         onRequestProfile = { onRequestPersonProfile(rec.name, rec.email) },
@@ -825,21 +829,25 @@ private fun ComposeRecipientTile(
     role: ParticipantRole,
     photo: ImageBitmap?,
     profile: PersonProfile?,
+    knownNames: Map<String, String>,
     enabled: Boolean,
     onRequestAvatar: (String) -> Unit,
     onRequestProfile: () -> Unit,
     onClick: () -> Unit,
     onRemove: () -> Unit
 ) {
-    LaunchedEffect(recipient.email) {
-        if ('@' in recipient.email &&
-            (recipient.name.isBlank() || recipient.name.equals(recipient.email, ignoreCase = true))
+    val emailKey = recipient.email.trim().lowercase()
+    val cachedName = knownNames[emailKey]
+    LaunchedEffect(recipient.email, cachedName) {
+        if (needsNameResolution(recipient.name, recipient.email) &&
+            cachedName.isNullOrBlank() &&
+            profile == null
         ) {
             onRequestProfile()
         }
     }
 
-    val resolvedName = profile?.displayName?.takeIf { it.isNotBlank() } ?: recipient.name
+    val resolvedName = resolveDisplayName(recipient.name, recipient.email, profile, knownNames)
     val nameColor = when (role) {
         ParticipantRole.TO -> MaterialTheme.colorScheme.tertiary
         ParticipantRole.CC -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
