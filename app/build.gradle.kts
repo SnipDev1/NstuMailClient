@@ -23,8 +23,8 @@ android {
         applicationId = "ru.nstu.mail"
         minSdk = 26
         targetSdk = 35
-        versionCode = 23
-        versionName = "1.0.9-test.1"
+        versionCode = 24
+        versionName = "1.0.9"
 
         buildConfigField("String", "GITHUB_REPO", "\"SnipDev1/NstuMailApk\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
