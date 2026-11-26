@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "NstuMail"
-include(":app")
+include(":core", ":app", ":desktop")

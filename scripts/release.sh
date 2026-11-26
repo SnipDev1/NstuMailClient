@@ -225,7 +225,7 @@ print(f"Версия обновлена: versionCode={next_code}, versionName={n
 PY
 
 echo "=== Запуск unit-тестов и сборки release APK ==="
-./gradlew testDebugUnitTest assembleRelease --no-daemon --console=plain
+./gradlew :core:test :app:testDebugUnitTest :desktop:test assembleRelease --no-daemon --console=plain
 
 RAW_APK="$ROOT_DIR/app/build/outputs/apk/release/app-release.apk"
 if [ ! -f "$RAW_APK" ]; then
@@ -243,6 +243,15 @@ OUT_APK="$ROOT_DIR/app/build/outputs/apk/release/NstuMail-$TAG.apk"
 cp -f "$RAW_APK" "$OUT_APK"
 echo "Готовый APK: $OUT_APK"
 
+echo "=== Сборка ПК-версий (Linux AppImage + Windows x64 ZIP) ==="
+"$ROOT_DIR/scripts/build-desktop.sh" "$VERSION"
+OUT_APPIMAGE="$ROOT_DIR/desktop/build/distributions/NstuMail-$TAG-linux-x86_64.AppImage"
+OUT_WIN_ZIP="$ROOT_DIR/desktop/build/distributions/NstuMail-$TAG-windows-x64.zip"
+if [ ! -f "$OUT_APPIMAGE" ] || [ ! -f "$OUT_WIN_ZIP" ]; then
+  echo "Ошибка: не найдены desktop-сборки ($OUT_APPIMAGE / $OUT_WIN_ZIP)." >&2
+  exit 1
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "=== --dry-run завершён успешно (без коммита, тега и публикации) ==="
   exit 0
@@ -257,9 +266,9 @@ echo "=== Отправка коммита и тега $TAG в origin/$TARGET_BRA
 git_push origin "HEAD:$TARGET_BRANCH"
 git_push origin "$TAG"
 
-echo "=== Создание GitHub Release $TAG (branch=$TARGET_BRANCH, prerelease=$PRERELEASE) и загрузка APK ==="
+echo "=== Создание GitHub Release $TAG (branch=$TARGET_BRANCH, prerelease=$PRERELEASE) и загрузка сборок ==="
 if [ "$USE_GH" -eq 1 ]; then
-  GH_ARGS=(release create "$TAG" "$OUT_APK" --repo "$REPO" --title "NstuMail $TAG" --notes "$NOTES")
+  GH_ARGS=(release create "$TAG" "$OUT_APK" "$OUT_APPIMAGE" "$OUT_WIN_ZIP" --repo "$REPO" --title "NstuMail $TAG" --notes "$NOTES")
   if [ "$PRERELEASE" = "true" ]; then
     GH_ARGS+=(--prerelease)
   fi
@@ -286,15 +295,25 @@ PY
 )"
   UPLOAD_URL="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["upload_url"].split("{")[0])' <<<"$CREATE_RESP")"
   HTML_URL="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["html_url"])' <<<"$CREATE_RESP")"
-  APK_NAME="$(basename "$OUT_APK")"
 
-  curl -fsSL -X POST \
-    -H "Accept: application/vnd.github+json" \
-    -H "Authorization: Bearer $GITHUB_TOKEN" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    -H "Content-Type: application/vnd.android.package-archive" \
-    --data-binary @"$OUT_APK" \
-    "${UPLOAD_URL}?name=${APK_NAME}" >/dev/null
+  upload_asset() {
+    local file_path="$1"
+    local mime="$2"
+    local asset_name
+    asset_name="$(basename "$file_path")"
+    curl -fsSL -X POST \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $GITHUB_TOKEN" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      -H "Content-Type: $mime" \
+      --data-binary @"$file_path" \
+      "${UPLOAD_URL}?name=${asset_name}" >/dev/null
+    echo "Загружен: $asset_name"
+  }
+
+  upload_asset "$OUT_APK" "application/vnd.android.package-archive"
+  upload_asset "$OUT_APPIMAGE" "application/octet-stream"
+  upload_asset "$OUT_WIN_ZIP" "application/zip"
 
   echo "Релиз опубликован: $HTML_URL"
 fi

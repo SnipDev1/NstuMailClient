@@ -2,6 +2,8 @@
 .kotlin/
 build/
 app/build/
+core/build/
+desktop/build/
 local.properties
 keystore.properties
 .release.env
@@ -11,6 +13,8 @@ keystore.properties
 *.keystore
 *.apk
 *.aab
+*.AppImage
+*.zip
 *.hprof
 .DS_Store
 Thumbs.db

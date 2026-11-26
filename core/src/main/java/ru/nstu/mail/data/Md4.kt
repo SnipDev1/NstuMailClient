@@ -6,7 +6,7 @@ import java.nio.ByteOrder
 /**
  * Pure-Kotlin RFC 1320 MD4 message-digest implementation (required for NTLMv2 NT hash).
  */
-internal object Md4 {
+object Md4 {
 
     fun digest(input: ByteArray): ByteArray {
         val bitLen = input.size.toLong() * 8L
