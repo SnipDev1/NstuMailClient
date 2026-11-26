@@ -13,6 +13,7 @@ import ru.nstu.mail.data.EwsXml
 import ru.nstu.mail.data.MailFilter
 import ru.nstu.mail.data.OutgoingAttachment
 import ru.nstu.mail.data.SystemFolderKind
+import ru.nstu.mail.ui.extractInitials
 import java.util.Base64
 
 class EwsXmlTest {
@@ -365,5 +366,19 @@ class EwsXmlTest {
                 // expected
             }
         }
+    }
+
+    @Test
+    fun `extractInitials and buildUserPhotoUrl handle names and emails`() {
+        assertEquals("НЕ", extractInitials("Никулин Евгений Николаевич", "nikulin@corp.nstu.ru"))
+        assertEquals("G", extractInitials("GitHub", "noreply@github.com"))
+        assertEquals("S", extractInitials("", "student.2025@stud.nstu.ru"))
+
+        val photoUrl = EwsClient.buildUserPhotoUrl("https://mail2.nstu.ru", "user@stud.nstu.ru")
+        assertEquals("https", photoUrl.scheme)
+        assertEquals("mail2.nstu.ru", photoUrl.host)
+        assertEquals("/EWS/Exchange.asmx/s/GetUserPhoto", photoUrl.encodedPath)
+        assertEquals("user@stud.nstu.ru", photoUrl.queryParameter("email"))
+        assertEquals("HR96x96", photoUrl.queryParameter("size"))
     }
 }

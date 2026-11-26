@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
             NstuMailTheme {
                 val vm: MailViewModel = viewModel()
                 val state by vm.state.collectAsState()
+                val avatars by vm.avatars.collectAsState()
                 val context = LocalContext.current
 
                 state.availableUpdate?.let { update ->
@@ -53,6 +54,8 @@ class MainActivity : ComponentActivity() {
 
                     Screen.MailList -> MailListScreen(
                         state = state,
+                        avatars = avatars,
+                        onRequestAvatar = vm::requestAvatar,
                         onSelectFolder = vm::selectFolder,
                         onSelectFilter = vm::setFilter,
                         onRefresh = vm::refresh,
@@ -87,9 +90,11 @@ class MainActivity : ComponentActivity() {
                                 detail = detail,
                                 folders = state.folders,
                                 currentFolder = state.currentFolder,
+                                avatars = avatars,
                                 isDownloadingAttachment = state.isDownloadingAttachment,
                                 toastMessage = state.toastMessage,
                                 onBack = vm::backToMailList,
+                                onRequestAvatar = vm::requestAvatar,
                                 onToggleRead = vm::toggleRead,
                                 onToggleFlag = vm::toggleFlagDetail,
                                 onReply = { vm.openCompose(replyTo = it) },
@@ -114,21 +119,25 @@ class MainActivity : ComponentActivity() {
                         isForward = screen.isForward,
                         draft = screen.draft,
                         directorySuggestions = state.directorySuggestions,
+                        avatars = avatars,
                         isSending = state.isSending,
                         errorMessage = state.errorMessage,
                         onBack = vm::backToMailList,
                         onSearchDirectory = vm::searchDirectory,
                         onClearSuggestions = vm::clearDirectorySuggestions,
+                        onRequestAvatar = vm::requestAvatar,
                         onSubmit = vm::saveOrSendEmail
                     )
 
                     Screen.Contacts -> ContactsScreen(
                         contacts = state.contacts,
                         directorySuggestions = state.directorySuggestions,
+                        avatars = avatars,
                         isLoading = state.isLoading,
                         toastMessage = state.toastMessage,
                         onBack = vm::backToMailList,
                         onSearchDirectory = vm::searchDirectory,
+                        onRequestAvatar = vm::requestAvatar,
                         onAddContact = vm::addContact,
                         onComposeTo = { email -> vm.openCompose(prefillTo = email) },
                         onClearToast = vm::clearToast

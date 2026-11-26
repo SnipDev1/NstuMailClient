@@ -88,6 +88,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -104,6 +105,8 @@ import ru.nstu.mail.data.SystemFolderKind
 @Composable
 fun MailListScreen(
     state: MailUiState,
+    avatars: Map<String, ImageBitmap?>,
+    onRequestAvatar: (String) -> Unit,
     onSelectFolder: (MailFolder) -> Unit,
     onSelectFilter: (MailFilter) -> Unit,
     onRefresh: () -> Unit,
@@ -237,19 +240,33 @@ fun MailListScreen(
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "Почта НГТУ",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val userEmail = state.credentials?.email.orEmpty()
+                        UserAvatar(
+                            name = userEmail.substringBefore('@'),
+                            email = userEmail,
+                            photo = avatars[userEmail.trim().lowercase()],
+                            size = 46.dp,
+                            onRequestLoad = onRequestAvatar
                         )
-                        Text(
-                            text = state.credentials?.email.orEmpty(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Почта НГТУ",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = userEmail,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                     HorizontalDivider()
                     Spacer(Modifier.height(6.dp))
@@ -589,9 +606,12 @@ fun MailListScreen(
                             items(state.messages, key = { it.id }) { item ->
                                 EmailRow(
                                     item = item,
+                                    photo = avatars[item.senderEmail.trim().lowercase()],
                                     selected = item.id in state.selectedIds,
+                                    onRequestAvatar = onRequestAvatar,
                                     onClick = { onOpenMessage(item) },
                                     onLongClick = { onToggleSelect(item.id) },
+                                    onAvatarClick = { onToggleSelect(item.id) },
                                     onToggleFlag = { onToggleFlag(item) }
                                 )
                                 HorizontalDivider(
@@ -696,9 +716,12 @@ private fun DrawerFolderItem(
 @Composable
 private fun EmailRow(
     item: EmailSummary,
+    photo: ImageBitmap?,
     selected: Boolean,
+    onRequestAvatar: (String) -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onAvatarClick: () -> Unit,
     onToggleFlag: () -> Unit
 ) {
     val weight = if (item.isRead) FontWeight.Normal else FontWeight.Bold
@@ -719,28 +742,17 @@ private fun EmailRow(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.Top
     ) {
-        Box(
+        UserAvatar(
+            name = item.senderName,
+            email = item.senderEmail,
+            photo = photo,
+            size = 40.dp,
+            selected = selected,
+            onRequestLoad = onRequestAvatar,
             modifier = Modifier
-                .padding(top = 4.dp, end = 10.dp)
-                .size(18.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            if (selected) {
-                Icon(
-                    Icons.Default.CheckCircle,
-                    contentDescription = "Выбрано",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
-            } else if (!item.isRead) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                )
-            }
-        }
+                .padding(top = 2.dp, end = 12.dp)
+                .clickable(onClick = onAvatarClick)
+        )
 
         Column(modifier = Modifier.weight(1f)) {
             Row(
@@ -748,6 +760,15 @@ private fun EmailRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (!item.isRead) {
+                    Box(
+                        modifier = Modifier
+                            .padding(end = 6.dp)
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
                 if (item.importance == EmailImportance.HIGH) {
                     Icon(
                         imageVector = Icons.Default.PriorityHigh,

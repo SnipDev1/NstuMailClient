@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -58,7 +59,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -75,9 +78,11 @@ fun MessageDetailScreen(
     detail: EmailDetail,
     folders: List<MailFolder>,
     currentFolder: MailFolder?,
+    avatars: Map<String, ImageBitmap?>,
     isDownloadingAttachment: Boolean,
     toastMessage: String?,
     onBack: () -> Unit,
+    onRequestAvatar: (String) -> Unit,
     onToggleRead: (EmailDetail) -> Unit,
     onToggleFlag: (EmailDetail) -> Unit,
     onReply: (EmailDetail) -> Unit,
@@ -257,43 +262,56 @@ fun MessageDetailScreen(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold
                 )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = if (detail.fromEmail.isNotBlank() &&
-                        !detail.from.equals(detail.fromEmail, ignoreCase = true)
-                    ) {
-                        "От: ${detail.from} <${detail.fromEmail}>"
-                    } else {
-                        "От: ${detail.from}"
-                    },
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                if (detail.to.isNotEmpty()) {
-                    Text(
-                        text = "Кому: ${detail.to.joinToString(", ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.Top) {
+                    UserAvatar(
+                        name = detail.from,
+                        email = detail.fromEmail,
+                        photo = avatars[detail.fromEmail.trim().lowercase()],
+                        size = 42.dp,
+                        onRequestLoad = onRequestAvatar
                     )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (detail.fromEmail.isNotBlank() &&
+                                !detail.from.equals(detail.fromEmail, ignoreCase = true)
+                            ) {
+                                "${detail.from} <${detail.fromEmail}>"
+                            } else {
+                                detail.from
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        if (detail.to.isNotEmpty()) {
+                            Text(
+                                text = "Кому: ${detail.to.joinToString(", ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (detail.cc.isNotEmpty()) {
+                            Text(
+                                text = "Копия: ${detail.cc.joinToString(", ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (detail.bcc.isNotEmpty()) {
+                            Text(
+                                text = "Скрытая копия: ${detail.bcc.joinToString(", ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = MailViewModel.formatMailDate(detail.receivedAt, detailed = true),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
-                if (detail.cc.isNotEmpty()) {
-                    Text(
-                        text = "Копия: ${detail.cc.joinToString(", ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (detail.bcc.isNotEmpty()) {
-                    Text(
-                        text = "Скрытая копия: ${detail.bcc.joinToString(", ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Text(
-                    text = MailViewModel.formatMailDate(detail.receivedAt, detailed = true),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
 
                 val visibleAttachments = detail.attachments.filterNot { it.isInline }
                 if (visibleAttachments.isNotEmpty()) {

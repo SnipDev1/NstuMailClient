@@ -50,6 +50,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -68,11 +69,13 @@ fun ComposeScreen(
     isForward: Boolean,
     draft: EmailDetail?,
     directorySuggestions: List<ContactEntry>,
+    avatars: Map<String, ImageBitmap?>,
     isSending: Boolean,
     errorMessage: String?,
     onBack: () -> Unit,
     onSearchDirectory: (String) -> Unit,
     onClearSuggestions: () -> Unit,
+    onRequestAvatar: (String) -> Unit,
     onSubmit: (
         draftId: String?,
         draftChangeKey: String?,
@@ -343,8 +346,17 @@ fun ComposeScreen(
                                         }
                                         onClearSuggestions()
                                     }
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
+                                UserAvatar(
+                                    name = entry.name,
+                                    email = entry.email,
+                                    photo = avatars[entry.email.trim().lowercase()],
+                                    size = 32.dp,
+                                    onRequestLoad = onRequestAvatar
+                                )
+                                Spacer(Modifier.size(10.dp))
                                 Column {
                                     Text(entry.name, style = MaterialTheme.typography.bodyMedium)
                                     Text(

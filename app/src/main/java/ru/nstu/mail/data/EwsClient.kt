@@ -2,6 +2,8 @@ package ru.nstu.mail.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -253,6 +255,48 @@ class EwsClient(private val credentials: Credentials) {
         EwsXml.parseSimpleSuccessResponse(xml)
     }
 
+    suspend fun getUserPhoto(email: String, size: String = "HR96x96"): ByteArray? =
+        withContext(Dispatchers.IO) {
+            val trimmed = email.trim()
+            if ('@' !in trimmed) return@withContext null
+            val url = buildUserPhotoUrl(baseUrl, trimmed, size)
+            try {
+                executeGetBytes(activeClient, url)
+            } catch (e: EwsException) {
+                if (e.isAuthError && !fallbackTried && credentials.email.contains('@') &&
+                    !credentials.email.contains('\\')
+                ) {
+                    fallbackTried = true
+                    val local = credentials.email.substringBefore('@')
+                    val domain = credentials.email.substringAfter('@')
+                    val altClient = buildHttpClient(local to domain)
+                    val bytes = executeGetBytes(altClient, url)
+                    activeClient = altClient
+                    bytes
+                } else {
+                    null
+                }
+            }
+        }
+
+    private fun executeGetBytes(client: OkHttpClient, url: HttpUrl): ByteArray? {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+        val response = runCatching { client.newCall(request).execute() }.getOrNull() ?: return null
+        response.use { resp ->
+            if (resp.code == 401) {
+                throw EwsException("Unauthorized", isAuthError = true)
+            }
+            if (resp.code != 200) return null
+            val body = resp.body ?: return null
+            if (body.contentLength() > MAX_AVATAR_BYTES) return null
+            val bytes = body.bytes()
+            return if (bytes.isEmpty() || bytes.size > MAX_AVATAR_BYTES) null else bytes
+        }
+    }
+
     // --- Transport ---
 
     private fun postSoapWithAuthFallback(soapBody: String): String {
@@ -341,6 +385,15 @@ class EwsClient(private val credentials: Credentials) {
 
     companion object {
         private val XML_MEDIA_TYPE = "text/xml; charset=utf-8".toMediaType()
+        private const val MAX_AVATAR_BYTES = 2 * 1024 * 1024L
+
+        fun buildUserPhotoUrl(baseUrl: String, email: String, size: String = "HR96x96"): HttpUrl =
+            baseUrl.toHttpUrl()
+                .newBuilder()
+                .addPathSegments("EWS/Exchange.asmx/s/GetUserPhoto")
+                .addQueryParameter("email", email.trim())
+                .addQueryParameter("size", size)
+                .build()
 
         fun normalizeHttpsUrl(raw: String): String {
             val trimmed = raw.trim().trimEnd('/')

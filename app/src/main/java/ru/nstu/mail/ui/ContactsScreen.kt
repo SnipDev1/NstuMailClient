@@ -42,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -52,10 +53,12 @@ import ru.nstu.mail.data.ContactEntry
 fun ContactsScreen(
     contacts: List<ContactEntry>,
     directorySuggestions: List<ContactEntry>,
+    avatars: Map<String, ImageBitmap?>,
     isLoading: Boolean,
     toastMessage: String?,
     onBack: () -> Unit,
     onSearchDirectory: (String) -> Unit,
+    onRequestAvatar: (String) -> Unit,
     onAddContact: (name: String, email: String) -> Unit,
     onComposeTo: (email: String) -> Unit,
     onClearToast: () -> Unit
@@ -173,7 +176,12 @@ fun ContactsScreen(
                         )
                     }
                     items(directorySuggestions, key = { "dir:${it.email}" }) { c ->
-                        ContactRow(contact = c, onClick = { onComposeTo(c.email) })
+                        ContactRow(
+                            contact = c,
+                            photo = avatars[c.email.trim().lowercase()],
+                            onRequestAvatar = onRequestAvatar,
+                            onClick = { onComposeTo(c.email) }
+                        )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                     }
                 }
@@ -203,9 +211,14 @@ fun ContactsScreen(
                     }
                 } else {
                     items(filteredPersonal, key = { "per:${it.id}:${it.email}" }) { c ->
-                        ContactRow(contact = c, onClick = {
-                            if (c.email.isNotBlank()) onComposeTo(c.email)
-                        })
+                        ContactRow(
+                            contact = c,
+                            photo = avatars[c.email.trim().lowercase()],
+                            onRequestAvatar = onRequestAvatar,
+                            onClick = {
+                                if (c.email.isNotBlank()) onComposeTo(c.email)
+                            }
+                        )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                     }
                 }
@@ -217,6 +230,8 @@ fun ContactsScreen(
 @Composable
 private fun ContactRow(
     contact: ContactEntry,
+    photo: ImageBitmap?,
+    onRequestAvatar: (String) -> Unit,
     onClick: () -> Unit
 ) {
     Row(
@@ -226,10 +241,12 @@ private fun ContactRow(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = if (contact.isFromDirectory) Icons.Default.Business else Icons.Default.Person,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary
+        UserAvatar(
+            name = contact.name,
+            email = contact.email,
+            photo = photo,
+            size = 40.dp,
+            onRequestLoad = onRequestAvatar
         )
         Spacer(Modifier.width(12.dp))
         Column {

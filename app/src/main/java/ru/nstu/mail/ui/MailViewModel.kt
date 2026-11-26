@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -12,6 +13,8 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.webkit.CookieManager
 import android.webkit.WebStorage
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -23,6 +26,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import ru.nstu.mail.BuildConfig
 import ru.nstu.mail.data.AppUpdateInfo
@@ -48,6 +53,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Base64
+import java.util.Collections
 import java.util.Locale
 
 sealed interface Screen {
@@ -100,6 +106,11 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
     private val updater = AppUpdater()
     private val _state = MutableStateFlow(MailUiState())
     val state: StateFlow<MailUiState> = _state.asStateFlow()
+
+    private val _avatars = MutableStateFlow<Map<String, ImageBitmap?>>(emptyMap())
+    val avatars: StateFlow<Map<String, ImageBitmap?>> = _avatars.asStateFlow()
+    private val requestedAvatars = Collections.synchronizedSet(mutableSetOf<String>())
+    private val avatarSemaphore = Semaphore(4)
 
     private var client: EwsClient? = null
     private var directoryJob: Job? = null
@@ -1122,9 +1133,34 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun requestAvatar(email: String) {
+        val key = email.trim().lowercase()
+        if ('@' !in key) return
+        val c = client ?: return
+        if (!requestedAvatars.add(key)) return
+
+        viewModelScope.launch {
+            val bitmap = avatarSemaphore.withPermit {
+                val bytes = runCatching { c.getUserPhoto(key) }.getOrNull()
+                if (bytes != null) {
+                    withContext(Dispatchers.Default) {
+                        runCatching {
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                        }.getOrNull()
+                    }
+                } else {
+                    null
+                }
+            }
+            _avatars.update { it + (key to bitmap) }
+        }
+    }
+
     fun logout() {
         client = null
         store.clear()
+        requestedAvatars.clear()
+        _avatars.value = emptyMap()
         runCatching {
             CookieManager.getInstance().removeAllCookies(null)
             CookieManager.getInstance().flush()
