@@ -26,7 +26,7 @@ android {
         versionCode = 26
         versionName = "1.0.11"
 
-        buildConfigField("String", "GITHUB_REPO", "\"SnipDev1/NstuMailApk\"")
+        buildConfigField("String", "GITHUB_REPO", "\"SnipDev1/NstuMailClient\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

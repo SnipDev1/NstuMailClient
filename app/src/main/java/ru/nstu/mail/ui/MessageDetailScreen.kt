@@ -102,7 +102,11 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.formatMailDate
+import ru.nstu.mail.data.formatShortPersonName
+import ru.nstu.mail.data.needsNameResolution
 import ru.nstu.mail.data.participants
+import ru.nstu.mail.data.resolveDisplayName
 import java.io.ByteArrayInputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -412,7 +416,7 @@ fun MessageDetailScreen(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = MailViewModel.formatMailDate(detail.receivedAt, detailed = true),
+                    text = formatMailDate(detail.receivedAt, detailed = true),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -584,6 +588,11 @@ private fun SandboxedEmailWebView(
                 webView.tag = html
                 webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
             }
+        },
+        onRelease = { webView ->
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            webView.destroy()
         }
     )
 }

@@ -24,7 +24,6 @@ enum class SwipeAction(val labelRu: String) {
 }
 
 val DEFAULT_TAG_TEMPLATES: List<String> = emptyList()
-val DEFAULT_TAGS = DEFAULT_TAG_TEMPLATES
 private val LEGACY_DEFAULT_TAG_TEMPLATES = setOf("учёба", "учёба/пз", "учёба/лаба", "учёба/лекция", "важно")
 const val UNSORTED_FOLDER_NAME = "Несортированные"
 

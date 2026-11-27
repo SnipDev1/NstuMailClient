@@ -13,13 +13,15 @@ import ru.nstu.mail.data.shouldRouteToUnsorted
 import java.awt.SystemTray
 import java.awt.Toolkit
 import java.awt.TrayIcon
+import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
 
 data class DesktopAutoSortOutcome(
     val movedFromInbox: Boolean,
     val targetFolderIds: List<String>,
     val foldersChanged: Boolean,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val movedItemIds: List<String> = emptyList()
 )
 
 object DesktopAutoSorter {
@@ -38,34 +40,16 @@ object DesktopAutoSorter {
 
         suspend fun ensureFoldersCache(): MutableList<MailFolder>? {
             if (cache == null) {
-                cache = runCatching { client.getFolders().toMutableList() }.getOrNull()
+                cache = runCatching { client.getFolders(includeSubtreeCounts = false).toMutableList() }.getOrNull()
             }
             return cache
         }
 
-        suspend fun moveResilient(targetId: String): Result<Unit> {
-            val first = runCatching { client.moveMessages(listOf(msg.id to msg.changeKey), targetId) }
-            if (first.isSuccess) return first
-            val err = first.exceptionOrNull()
-            if (err is EwsException && err.isAuthError) return first
-            return if (msg.changeKey.isNotBlank()) {
-                runCatching { client.moveMessages(listOf(msg.id to ""), targetId) }
-            } else {
-                first
-            }
-        }
+        suspend fun moveResilient(targetId: String): Result<List<String>> =
+            runCatching { client.moveMessagesReturningIds(listOf(msg.id to msg.changeKey), targetId) }
 
-        suspend fun copyResilient(targetId: String): Result<Unit> {
-            val first = runCatching { client.copyMessages(listOf(msg.id to msg.changeKey), targetId) }
-            if (first.isSuccess) return first
-            val err = first.exceptionOrNull()
-            if (err is EwsException && err.isAuthError) return first
-            return if (msg.changeKey.isNotBlank()) {
-                runCatching { client.copyMessages(listOf(msg.id to ""), targetId) }
-            } else {
-                first
-            }
-        }
+        suspend fun copyResilient(targetId: String): Result<Unit> =
+            runCatching { client.copyMessages(listOf(msg.id to msg.changeKey), targetId) }
 
         suspend fun resolveSubfolderTarget(
             baseFolderId: String,
@@ -84,7 +68,7 @@ object DesktopAutoSorter {
                 if (child == null) {
                     val created = runCatching {
                         client.createFolder(safeName, parentFolderId = targetId)
-                        client.getFolders()
+                        client.getFolders(includeSubtreeCounts = false)
                     }.getOrNull()
                     if (created != null) {
                         workingFolders.clear()
@@ -142,7 +126,13 @@ object DesktopAutoSorter {
                     }
                     val moveRes = moveResilient(externalTargets.first())
                     if (moveRes.isSuccess) {
-                        return DesktopAutoSortOutcome(true, externalTargets, foldersChanged, lastError) to cache
+                        return DesktopAutoSortOutcome(
+                            movedFromInbox = true,
+                            targetFolderIds = externalTargets,
+                            foldersChanged = foldersChanged,
+                            errorMessage = lastError,
+                            movedItemIds = moveRes.getOrDefault(emptyList())
+                        ) to cache
                     } else {
                         lastError = moveRes.exceptionOrNull()?.message ?: lastError
                     }
@@ -171,7 +161,7 @@ object DesktopAutoSorter {
                     !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
                 }
                 if (unsorted == null && workingFolders != null) {
-                    val refreshed = runCatching { client.getFolders() }.getOrNull()
+                    val refreshed = runCatching { client.getFolders(includeSubtreeCounts = false) }.getOrNull()
                     if (refreshed != null) {
                         workingFolders.clear()
                         workingFolders.addAll(refreshed)
@@ -182,7 +172,7 @@ object DesktopAutoSorter {
                     if (unsorted == null) {
                         val created = runCatching {
                             client.createFolder(UNSORTED_FOLDER_NAME, parentFolderId = null)
-                            client.getFolders()
+                            client.getFolders(includeSubtreeCounts = false)
                         }.getOrElse { err ->
                             lastError = lastError ?: err.message
                             null
@@ -204,7 +194,8 @@ object DesktopAutoSorter {
                         movedFromInbox = moveRes.isSuccess,
                         targetFolderIds = if (moveRes.isSuccess) listOf(unsorted.id) else emptyList(),
                         foldersChanged = foldersChanged,
-                        errorMessage = lastError
+                        errorMessage = lastError,
+                        movedItemIds = moveRes.getOrDefault(emptyList())
                     ) to cache
                 }
             }
@@ -222,10 +213,16 @@ object DesktopNotificationPoster {
         val os = System.getProperty("os.name").orEmpty().lowercase()
         if ("linux" in os) {
             val sent = runCatching {
-                ProcessBuilder("notify-send", "-a", "Почта НГТУ", title, message)
+                val proc = ProcessBuilder("notify-send", "-a", "Почта НГТУ", title, message)
                     .redirectErrorStream(true)
                     .start()
-                    .waitFor() == 0
+                val finished = proc.waitFor(3, TimeUnit.SECONDS)
+                if (!finished) {
+                    proc.destroyForcibly()
+                    false
+                } else {
+                    proc.exitValue() == 0
+                }
             }.getOrDefault(false)
             if (sent) return
         }

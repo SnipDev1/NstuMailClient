@@ -224,6 +224,38 @@ object MailRulesStore {
         return next
     }
 
+    fun renameFolderInRules(context: Context, folderId: String, newName: String): List<TagSortRule> {
+        val cleanName = newName.trim()
+        if (folderId.isBlank() || cleanName.isEmpty()) return getTagSortRules(context)
+        val current = getTagSortRules(context)
+        var changed = false
+        val updated = current.map { r ->
+            if (r.targetFolderId == folderId && r.targetFolderName != cleanName) {
+                changed = true
+                r.copy(targetFolderName = cleanName)
+            } else {
+                r
+            }
+        }
+        if (changed) saveTagSortRules(context, updated)
+        return updated
+    }
+
+    fun pruneDeletedFolders(context: Context, deletedFolderIds: Set<String>): Pair<Set<String>, List<TagSortRule>> {
+        if (deletedFolderIds.isEmpty()) return getMutedFolderIds(context) to getTagSortRules(context)
+        val muted = getMutedFolderIds(context)
+        val nextMuted = muted - deletedFolderIds
+        if (nextMuted.size != muted.size) {
+            prefs(context).edit().putStringSet(KEY_MUTED_FOLDERS, nextMuted).apply()
+        }
+        val rules = getTagSortRules(context)
+        val nextRules = rules.filterNot { it.targetFolderId in deletedFolderIds }
+        if (nextRules.size != rules.size) {
+            saveTagSortRules(context, nextRules)
+        }
+        return nextMuted to nextRules
+    }
+
     fun getSwipeRightAction(context: Context): SwipeAction =
         runCatching {
             val saved = prefs(context).getString(KEY_SWIPE_RIGHT, SwipeAction.TOGGLE_READ.name)

@@ -496,31 +496,11 @@ object MailNotificationHelper {
             return cache
         }
 
-        suspend fun moveResilient(targetId: String): Result<List<String>> {
-            val first = runCatching {
-                client.moveMessagesReturningIds(listOf(msg.id to msg.changeKey), targetId)
-            }
-            if (first.isSuccess) return first
-            val err = first.exceptionOrNull()
-            if (err is EwsException && err.isAuthError) return first
-            return if (msg.changeKey.isNotBlank()) {
-                runCatching { client.moveMessagesReturningIds(listOf(msg.id to ""), targetId) }
-            } else {
-                first
-            }
-        }
+        suspend fun moveResilient(targetId: String): Result<List<String>> =
+            runCatching { client.moveMessagesReturningIds(listOf(msg.id to msg.changeKey), targetId) }
 
-        suspend fun copyResilient(targetId: String): Result<Unit> {
-            val first = runCatching { client.copyMessages(listOf(msg.id to msg.changeKey), targetId) }
-            if (first.isSuccess) return first
-            val err = first.exceptionOrNull()
-            if (err is EwsException && err.isAuthError) return first
-            return if (msg.changeKey.isNotBlank()) {
-                runCatching { client.copyMessages(listOf(msg.id to ""), targetId) }
-            } else {
-                first
-            }
-        }
+        suspend fun copyResilient(targetId: String): Result<Unit> =
+            runCatching { client.copyMessages(listOf(msg.id to msg.changeKey), targetId) }
 
         suspend fun resolveSubfolderTarget(
             baseFolderId: String,

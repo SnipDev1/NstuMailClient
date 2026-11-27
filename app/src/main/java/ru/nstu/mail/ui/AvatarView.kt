@@ -22,32 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import ru.nstu.mail.data.PersonProfile
-import kotlin.math.absoluteValue
-
-fun needsNameResolution(name: String, email: String): Boolean {
-    val cleanEmail = email.trim()
-    if ('@' !in cleanEmail) return false
-    val cleanName = name.trim().replace(Regex("[\"'<>]"), "")
-    if (cleanName.isEmpty() || '@' in cleanName) return true
-    return cleanName.equals(cleanEmail.substringBefore('@'), ignoreCase = true)
-}
-
-fun resolveDisplayName(
-    name: String,
-    email: String,
-    profile: PersonProfile?,
-    knownNames: Map<String, String>
-): String {
-    val key = email.trim().lowercase()
-    val profileName = profile?.displayName?.trim().orEmpty()
-    if (profileName.isNotEmpty() && !needsNameResolution(profileName, email)) return profileName
-    val cleanName = name.trim()
-    if (cleanName.isNotEmpty() && !needsNameResolution(cleanName, email)) return cleanName
-    val cached = knownNames[key]?.trim().orEmpty()
-    if (cached.isNotEmpty() && !needsNameResolution(cached, email)) return cached
-    return profileName.ifEmpty { cleanName.ifEmpty { email.trim() } }
-}
+import ru.nstu.mail.data.avatarPaletteIndex
+import ru.nstu.mail.data.extractInitials
 
 private val AVATAR_PALETTE = listOf(
     Color(0xFF006B47),
@@ -60,53 +36,8 @@ private val AVATAR_PALETTE = listOf(
     Color(0xFF4361EE)
 )
 
-fun extractInitials(name: String, email: String): String {
-    val cleanName = name.trim().replace(Regex("[\"'<>]"), "")
-    val words = cleanName
-        .split(Regex("\\s+"))
-        .map { it.trim(',', '.', ';', ':') }
-        .filter { it.isNotEmpty() && !it.contains('@') }
-
-    if (words.size >= 2) {
-        val a = words[0].firstOrNull()?.uppercaseChar()
-        val b = words[1].firstOrNull()?.uppercaseChar()
-        if (a != null && b != null) return "$a$b"
-    }
-    if (words.size == 1) {
-        val a = words[0].firstOrNull()?.uppercaseChar()
-        if (a != null) return a.toString()
-    }
-    val local = email.trim().substringBefore('@')
-    return local.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-}
-
-fun avatarColorFor(key: String): Color {
-    val norm = key.trim().lowercase().ifEmpty { "default" }
-    val idx = norm.hashCode().absoluteValue % AVATAR_PALETTE.size
-    return AVATAR_PALETTE[idx]
-}
-
-fun formatShortPersonName(name: String, email: String): String {
-    val cleanName = name.trim().replace(Regex("[\"'<>]"), "")
-    val words = cleanName
-        .split(Regex("\\s+"))
-        .map { it.trim(',', '.', ';', ':') }
-        .filter { it.isNotEmpty() && !it.contains('@') }
-
-    return when {
-        words.size >= 3 -> {
-            val i1 = words[1].firstOrNull()?.uppercaseChar()
-            val i2 = words[2].firstOrNull()?.uppercaseChar()
-            if (i1 != null && i2 != null) "${words[0]} $i1.$i2." else words[0]
-        }
-        words.size == 2 -> {
-            val i1 = words[1].firstOrNull()?.uppercaseChar()
-            if (i1 != null) "${words[0]} $i1." else words[0]
-        }
-        words.size == 1 -> words[0]
-        else -> email.trim().substringBefore('@').ifBlank { email.trim().ifBlank { "?" } }
-    }
-}
+fun avatarColorFor(key: String): Color =
+    AVATAR_PALETTE[avatarPaletteIndex(key, AVATAR_PALETTE.size)]
 
 @Composable
 fun UserAvatar(

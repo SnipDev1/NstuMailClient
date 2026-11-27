@@ -83,12 +83,16 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.formatMailDate
+import ru.nstu.mail.data.formatShortPersonName
 import ru.nstu.mail.data.formatSubjectWithTagHierarchies
 import ru.nstu.mail.data.formatTagHierarchiesRaw
 import ru.nstu.mail.data.formatTagPath
+import ru.nstu.mail.data.needsNameResolution
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
 import java.util.concurrent.atomic.AtomicLong
 
@@ -285,7 +289,7 @@ fun ComposeScreen(
                     } else {
                         replyTo.body.trim()
                     }
-                    val date = MailViewModel.formatMailDate(replyTo.receivedAt, detailed = true)
+                    val date = formatMailDate(replyTo.receivedAt, detailed = true)
                     "\n\n--- Исходное сообщение ---\nОт: ${replyTo.from}\nДата: $date\n\n$plain"
                 }
                 else -> ""

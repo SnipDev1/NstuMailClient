@@ -33,7 +33,7 @@ class AppUpdaterTest {
     fun `isTrustedGithubApkUrl allows only github https origins without userinfo`() {
         assertTrue(
             AppUpdater.isTrustedGithubApkUrl(
-                "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.1/app-release.apk"
+                "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.1/app-release.apk"
             )
         )
         assertTrue(
@@ -41,7 +41,7 @@ class AppUpdaterTest {
                 "https://objects.githubusercontent.com/github-production-release-asset/123/app.apk"
             )
         )
-        assertFalse(AppUpdater.isTrustedGithubApkUrl("http://github.com/SnipDev1/NstuMailApk/app.apk"))
+        assertFalse(AppUpdater.isTrustedGithubApkUrl("http://github.com/SnipDev1/NstuMailClient/app.apk"))
         assertFalse(AppUpdater.isTrustedGithubApkUrl("https://evil.com/app.apk"))
         assertFalse(AppUpdater.isTrustedGithubApkUrl("https://github.com.evil.com/app.apk"))
         assertFalse(AppUpdater.isTrustedGithubApkUrl("https://user@github.com/app.apk"))
@@ -59,12 +59,12 @@ class AppUpdaterTest {
                 {
                   "name": "app-debug.apk",
                   "size": 17000000,
-                  "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.1.0/app-debug.apk"
+                  "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.1.0/app-debug.apk"
                 },
                 {
                   "name": "NstuMail-1.1.0.apk",
                   "size": 12000000,
-                  "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.1.0/NstuMail-1.1.0.apk"
+                  "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.1.0/NstuMail-1.1.0.apk"
                 }
               ]
             }
@@ -100,7 +100,7 @@ class AppUpdaterTest {
                         {
                           "name": "NstuMail-v1.0.2.apk",
                           "size": 1024,
-                          "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.2/NstuMail-v1.0.2.apk"
+                          "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.2/NstuMail-v1.0.2.apk"
                         }
                       ]
                     }
@@ -110,7 +110,7 @@ class AppUpdaterTest {
             server.enqueue(MockResponse().setResponseCode(404))
 
             val updater = AppUpdater(
-                repo = "SnipDev1/NstuMailApk",
+                repo = "SnipDev1/NstuMailClient",
                 apiBaseUrl = server.url("/").toString().trimEnd('/')
             )
 
@@ -119,7 +119,7 @@ class AppUpdaterTest {
             assertEquals("v1.0.2", found!!.tagName)
 
             val req = server.takeRequest()
-            assertEquals("/repos/SnipDev1/NstuMailApk/releases/latest", req.path)
+            assertEquals("/repos/SnipDev1/NstuMailClient/releases/latest", req.path)
 
             assertNull(updater.checkLatestRelease("1.0.0"))
         } finally {
@@ -143,7 +143,7 @@ class AppUpdaterTest {
                       {
                         "name": "NstuMail-v1.0.6-test.2.apk",
                         "size": 2048,
-                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.2/NstuMail-v1.0.6-test.2.apk"
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.6-test.2/NstuMail-v1.0.6-test.2.apk"
                       }
                     ]
                   },
@@ -156,7 +156,7 @@ class AppUpdaterTest {
                       {
                         "name": "NstuMail-v1.0.6-test.1.apk",
                         "size": 1024,
-                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.1/NstuMail-v1.0.6-test.1.apk"
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.6-test.1/NstuMail-v1.0.6-test.1.apk"
                       }
                     ]
                   },
@@ -169,7 +169,7 @@ class AppUpdaterTest {
                       {
                         "name": "NstuMail-v1.0.7-test.1.apk",
                         "size": 1024,
-                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.7-test.1/NstuMail-v1.0.7-test.1.apk"
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.7-test.1/NstuMail-v1.0.7-test.1.apk"
                       }
                     ]
                   }
@@ -178,7 +178,7 @@ class AppUpdaterTest {
             server.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson))
 
             val updater = AppUpdater(
-                repo = "SnipDev1/NstuMailApk",
+                repo = "SnipDev1/NstuMailClient",
                 apiBaseUrl = server.url("/").toString().trimEnd('/')
             )
 
@@ -188,7 +188,7 @@ class AppUpdaterTest {
             assertTrue(found.isPrerelease)
 
             val req = server.takeRequest()
-            assertEquals("/repos/SnipDev1/NstuMailApk/releases?per_page=50", req.path)
+            assertEquals("/repos/SnipDev1/NstuMailClient/releases?per_page=50", req.path)
         } finally {
             server.shutdown()
         }
@@ -210,7 +210,7 @@ class AppUpdaterTest {
                       {
                         "name": "NstuMail-v1.0.6-test.9.apk",
                         "size": 1000,
-                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.9/NstuMail-v1.0.6-test.9.apk"
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.6-test.9/NstuMail-v1.0.6-test.9.apk"
                       }
                     ]
                   },
@@ -223,7 +223,7 @@ class AppUpdaterTest {
                       {
                         "name": "NstuMail-v1.0.6-test.13.apk",
                         "size": 2000,
-                        "browser_download_url": "https://github.com/SnipDev1/NstuMailApk/releases/download/v1.0.6-test.13/NstuMail-v1.0.6-test.13.apk"
+                        "browser_download_url": "https://github.com/SnipDev1/NstuMailClient/releases/download/v1.0.6-test.13/NstuMail-v1.0.6-test.13.apk"
                       }
                     ]
                   }
@@ -232,7 +232,7 @@ class AppUpdaterTest {
             server.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson))
 
             val updater = AppUpdater(
-                repo = "SnipDev1/NstuMailApk",
+                repo = "SnipDev1/NstuMailClient",
                 apiBaseUrl = server.url("/").toString().trimEnd('/')
             )
 

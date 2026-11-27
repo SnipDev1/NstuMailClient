@@ -283,7 +283,7 @@ hr { border: 0; border-top: 1px solid $hrColor; }
         val inner = token.substringAfter('(', "").substringBefore(')')
         val parts = inner.split(',').map { it.trim().toDoubleOrNull() ?: return null }
         if (parts.size < 3) return null
-        if (parts.size >= 4 && parts[3] <= 0.15) return intArrayOf(255, 255, 255)
+        if (parts.size >= 4 && parts[3] <= 0.15) return null
         return intArrayOf(
             parts[0].toInt().coerceIn(0, 255),
             parts[1].toInt().coerceIn(0, 255),

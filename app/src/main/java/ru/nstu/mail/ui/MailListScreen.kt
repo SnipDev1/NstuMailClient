@@ -9,6 +9,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -118,8 +120,10 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.formatMailDate
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.resolveDisplayName
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -185,7 +189,10 @@ fun MailListScreen(
     }
 
     val selectionMode = state.selectedIds.isNotEmpty()
-    BackHandler(enabled = selectionMode, onBack = onClearSelection)
+    BackHandler(enabled = drawerState.isOpen) {
+        scope.launch { drawerState.close() }
+    }
+    BackHandler(enabled = selectionMode && !drawerState.isOpen, onBack = onClearSelection)
 
     LaunchedEffect(state.toastMessage) {
         val msg = state.toastMessage ?: return@LaunchedEffect
@@ -208,7 +215,7 @@ fun MailListScreen(
     moveSingleTarget?.let { msg ->
         FolderPickerDialog(
             folders = state.folders,
-            excludeFolderId = state.currentFolder?.id,
+            excludeFolderId = msg.parentFolderId.ifBlank { state.currentFolder?.id },
             onDismiss = { moveSingleTarget = null },
             onSelect = { target ->
                 moveSingleTarget = null
@@ -284,6 +291,7 @@ fun MailListScreen(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled = drawerState.isOpen || swipeRightAction == SwipeAction.NONE,
         drawerContent = {
             ModalDrawerSheet {
                 Column(
@@ -795,6 +803,9 @@ fun MailListScreen(
                             )
                         }
                     } else {
+                        val junkFolderId = remember(state.folders) {
+                            state.folders.firstOrNull { it.systemKind == SystemFolderKind.JUNK }?.id
+                        }
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(state.messages, key = { it.id }) { item ->
                                 val senderKey = item.senderEmail.trim().lowercase()
@@ -804,12 +815,15 @@ fun MailListScreen(
                                     profile = personProfiles[senderKey],
                                     knownNames = knownNames
                                 )
+                                val itemInJunk = state.currentFolder?.systemKind == SystemFolderKind.JUNK ||
+                                    (junkFolderId != null && item.parentFolderId == junkFolderId)
                                 SwipeableEmailRow(
                                     item = item,
                                     displaySenderName = resolvedSenderName,
                                     photo = avatars[senderKey],
                                     selected = item.id in state.selectedIds,
                                     selectionMode = selectionMode,
+                                    isInJunk = itemInJunk,
                                     swipeRightAction = swipeRightAction,
                                     swipeLeftAction = swipeLeftAction,
                                     onRequestAvatar = onRequestAvatar,
@@ -991,6 +1005,7 @@ private fun SwipeableEmailRow(
     photo: ImageBitmap?,
     selected: Boolean,
     selectionMode: Boolean,
+    isInJunk: Boolean,
     swipeRightAction: SwipeAction,
     swipeLeftAction: SwipeAction,
     onRequestAvatar: (String) -> Unit,
@@ -1003,6 +1018,7 @@ private fun SwipeableEmailRow(
     val currentItem by rememberUpdatedState(item)
     val currentRight by rememberUpdatedState(swipeRightAction)
     val currentLeft by rememberUpdatedState(swipeLeftAction)
+    val currentExecute by rememberUpdatedState(onExecuteSwipeAction)
 
     if (selectionMode || (swipeRightAction == SwipeAction.NONE && swipeLeftAction == SwipeAction.NONE)) {
         EmailRow(
@@ -1024,20 +1040,26 @@ private fun SwipeableEmailRow(
             when (value) {
                 SwipeToDismissBoxValue.StartToEnd -> {
                     if (currentRight != SwipeAction.NONE) {
-                        onExecuteSwipeAction(currentRight, currentItem)
+                        currentExecute(currentRight, currentItem)
                     }
                     false
                 }
                 SwipeToDismissBoxValue.EndToStart -> {
                     if (currentLeft != SwipeAction.NONE) {
-                        onExecuteSwipeAction(currentLeft, currentItem)
+                        currentExecute(currentLeft, currentItem)
                     }
                     false
                 }
-                SwipeToDismissBoxValue.Settled -> false
+                SwipeToDismissBoxValue.Settled -> true
             }
         }
     )
+
+    LaunchedEffect(dismissState.currentValue) {
+        if (dismissState.currentValue != SwipeToDismissBoxValue.Settled) {
+            dismissState.snapTo(SwipeToDismissBoxValue.Settled)
+        }
+    }
 
     SwipeToDismissBox(
         state = dismissState,
@@ -1064,7 +1086,7 @@ private fun SwipeableEmailRow(
             }
             val icon = when (action) {
                 SwipeAction.DELETE -> Icons.Default.Delete
-                SwipeAction.SPAM -> Icons.Default.Report
+                SwipeAction.SPAM -> if (isInJunk) Icons.Default.Inbox else Icons.Default.Report
                 SwipeAction.TOGGLE_READ ->
                     if (item.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead
                 SwipeAction.TOGGLE_FLAG ->
@@ -1108,7 +1130,7 @@ private fun SwipeableEmailRow(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun EmailRow(
     item: EmailSummary,
@@ -1194,7 +1216,7 @@ private fun EmailRow(
                     Spacer(Modifier.width(4.dp))
                 }
                 Text(
-                    text = MailViewModel.formatMailDate(item.receivedAt),
+                    text = formatMailDate(item.receivedAt),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (item.isRead) {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -1214,12 +1236,12 @@ private fun EmailRow(
                         extractSubjectTagHierarchies(item.subject)
                     }
                     if (tagHierarchies.isNotEmpty()) {
-                        Row(
+                        FlowRow(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
                                 .padding(bottom = 2.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             tagHierarchies.forEach { hierarchy ->
                                 Surface(

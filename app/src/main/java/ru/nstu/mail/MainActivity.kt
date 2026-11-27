@@ -217,7 +217,7 @@ class MainActivity : ComponentActivity() {
                                 onClearToast = vm::clearToast
                             )
                         } else {
-                            vm.backToMailList()
+                            LaunchedEffect(Unit) { vm.backToMailList() }
                         }
                     }
 

@@ -272,10 +272,14 @@ private fun CreateEventDialog(
                     val eIso = DateTimeFormatter.ISO_INSTANT.format(
                         LocalDateTime.of(d, t2).atZone(zone).toInstant()
                     )
-                    sIso to eIso
+                    Triple(sIso, eIso, t2.isAfter(t1))
                 }.getOrNull()
                 if (subject.isBlank() || parsed == null) {
                     error = "Проверьте название, дату (ГГГГ-ММ-ДД) и время (ЧЧ:ММ)"
+                    return@TextButton
+                }
+                if (!parsed.third) {
+                    error = "Время окончания должно быть позже начала"
                     return@TextButton
                 }
                 onConfirm(subject, parsed.first, parsed.second, location, notes)

@@ -114,8 +114,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -243,7 +245,10 @@ private fun DesktopLoginPane(
         ) {
             Column(
                 modifier = Modifier.padding(24.dp).onPreviewKeyEvent { ev ->
-                    if (ev.key == Key.Enter && !state.isLoading) {
+                    if (ev.type == KeyEventType.KeyDown &&
+                        (ev.key == Key.Enter || ev.key == Key.NumPadEnter) &&
+                        !state.isLoading
+                    ) {
                         onLogin(email, password, serverUrl)
                         true
                     } else false
@@ -658,7 +663,9 @@ private fun DesktopWorkspace(
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp)
                             .onPreviewKeyEvent { ev ->
-                                if (ev.key == Key.Enter) {
+                                if (ev.type == KeyEventType.KeyDown &&
+                                    (ev.key == Key.Enter || ev.key == Key.NumPadEnter)
+                                ) {
                                     controller.search(searchDraft)
                                     true
                                 } else false
@@ -801,6 +808,8 @@ private fun DesktopWorkspace(
                                 replyAll = pane.replyAll,
                                 isForward = pane.isForward,
                                 draft = pane.draft,
+                                prefillTo = pane.prefillTo,
+                                prefillName = pane.prefillName,
                                 suggestions = state.directorySuggestions,
                                 profiles = profiles,
                                 knownNames = knownNames,
@@ -823,7 +832,8 @@ private fun DesktopWorkspace(
                             events = state.calendarEvents,
                             onClose = controller::closeRightPane,
                             onRefresh = controller::openCalendar,
-                            onCreateEvent = controller::createCalendarEvent
+                            onCreateEvent = controller::createCalendarEvent,
+                            onDeleteEvent = controller::deleteCalendarEvent
                         )
                         DesktopRightPane.Settings -> DesktopSettingsPane(
                             state = state,
@@ -1405,6 +1415,33 @@ private fun DesktopPersonInfoDialog(
     )
 }
 
+internal fun appendRecipientEmail(currentText: String, email: String): String {
+    val cleanEmail = email.trim()
+    if (cleanEmail.isEmpty()) return currentText
+    val prefixPart = if (',' in currentText || ';' in currentText) {
+        val lastSep = maxOf(currentText.lastIndexOf(','), currentText.lastIndexOf(';'))
+        currentText.substring(0, lastSep)
+    } else {
+        ""
+    }
+    val existing = splitEmails(prefixPart).toMutableList()
+    if (existing.none { it.equals(cleanEmail, ignoreCase = true) }) {
+        existing += cleanEmail
+    }
+    return existing.joinToString(", ")
+}
+
+private fun htmlToPlainBody(html: String): String {
+    val doc = Jsoup.parse(html)
+    doc.outputSettings().prettyPrint(false)
+    doc.select("br").append("\\n")
+    doc.select("p, div, li, tr").prepend("\\n")
+    return doc.text()
+        .replace("\\n", "\n")
+        .replace(Regex("\n{3,}"), "\n\n")
+        .trim()
+}
+
 @Composable
 private fun DesktopComposePane(
     currentUserEmail: String,
@@ -1412,6 +1449,8 @@ private fun DesktopComposePane(
     replyAll: Boolean,
     isForward: Boolean,
     draft: EmailDetail?,
+    prefillTo: String? = null,
+    prefillName: String? = null,
     suggestions: List<ContactEntry>,
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
@@ -1423,10 +1462,11 @@ private fun DesktopComposePane(
     onAddTagTemplate: (String) -> Unit,
     onSubmit: (String?, String?, String, String, String, String, String, List<File>, Boolean) -> Unit
 ) {
-    var toText by remember(draft?.id, replyTo?.id, replyAll, isForward) {
+    var toText by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) {
         mutableStateOf(
             when {
                 draft != null -> draft.to.map { parseFormattedRecipient(it).second.ifBlank { it } }.joinToString(", ")
+                !prefillTo.isNullOrBlank() -> prefillTo.trim()
                 replyTo != null && !isForward && replyAll ->
                     (listOf(replyTo.fromEmail) + replyTo.to.map { parseFormattedRecipient(it).second })
                         .filter { it.isNotBlank() && !it.equals(currentUserEmail, true) }
@@ -1437,7 +1477,7 @@ private fun DesktopComposePane(
             }
         )
     }
-    var ccText by remember(draft?.id, replyTo?.id, replyAll) {
+    var ccText by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) {
         mutableStateOf(
             when {
                 draft != null -> draft.cc.map { parseFormattedRecipient(it).second.ifBlank { it } }.joinToString(", ")
@@ -1449,28 +1489,32 @@ private fun DesktopComposePane(
             }
         )
     }
-    var bccText by remember(draft?.id) {
+    var bccText by remember(draft?.id, replyTo?.id, prefillTo) {
         mutableStateOf(draft?.bcc.orEmpty().map { parseFormattedRecipient(it).second.ifBlank { it } }.joinToString(", "))
     }
-    var showCc by remember { mutableStateOf(ccText.isNotBlank()) }
-    var showBcc by remember { mutableStateOf(bccText.isNotBlank()) }
-    val initialSubj = remember(draft?.id, replyTo?.id, isForward) {
+    var showCc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(ccText.isNotBlank()) }
+    var showBcc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(bccText.isNotBlank()) }
+    val initialSubj = remember(draft?.id, replyTo?.id, isForward, prefillTo) {
         when {
-            draft != null -> extractSubjectTagHierarchies(draft.subject)
+            draft != null -> if (draft.subject == "(Без темы)") {
+                emptyList<List<String>>() to ""
+            } else {
+                extractSubjectTagHierarchies(draft.subject)
+            }
             replyTo == null -> emptyList<List<String>>() to ""
             isForward -> emptyList<List<String>>() to (if (replyTo.subject.startsWith("Fwd:", true)) replyTo.subject else "Fwd: ${replyTo.subject}")
             else -> emptyList<List<String>>() to (if (replyTo.subject.startsWith("Re:", true)) replyTo.subject else "Re: ${replyTo.subject}")
         }
     }
-    var savedHierarchies by remember(draft?.id, replyTo?.id) { mutableStateOf(initialSubj.first) }
-    var activePath by remember { mutableStateOf<List<String>>(emptyList()) }
-    var subject by remember(draft?.id, replyTo?.id) { mutableStateOf(initialSubj.second) }
-    var body by remember(draft?.id, replyTo?.id) {
+    var savedHierarchies by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf(initialSubj.first) }
+    var activePath by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf<List<String>>(emptyList()) }
+    var subject by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf(initialSubj.second) }
+    var body by remember(draft?.id, replyTo?.id, prefillTo) {
         mutableStateOf(
             when {
-                draft != null -> if (draft.isHtml) Jsoup.parse(draft.body).text() else draft.body
+                draft != null -> if (draft.isHtml) htmlToPlainBody(draft.body) else draft.body
                 replyTo != null -> {
-                    val plain = if (replyTo.isHtml) Jsoup.parse(replyTo.body).text() else replyTo.body
+                    val plain = if (replyTo.isHtml) htmlToPlainBody(replyTo.body) else replyTo.body
                     "\n\n--- Исходное сообщение ---\nОт: ${replyTo.from}\nДата: ${formatMailDate(replyTo.receivedAt, true)}\n\n$plain"
                 }
                 else -> ""
@@ -1483,10 +1527,7 @@ private fun DesktopComposePane(
     val allHierarchies = (savedHierarchies + listOfNotNull(activePath.takeIf { it.isNotEmpty() })).distinctBy { formatTagPath(it).lowercase() }
 
     fun appendRecipient(email: String) {
-        val current = splitEmails(toText).filterNot { it.equals(email, true) }
-        val base = if (',' in toText) toText.substringBeforeLast(',') + ", " else ""
-        toText = (base + (current.dropLast(if (',' in toText) 0 else 1) + email).distinct().joinToString(", "))
-            .ifBlank { email }
+        toText = appendRecipientEmail(toText, email)
         onClearSuggestions()
     }
 
@@ -1577,8 +1618,9 @@ private fun DesktopComposePane(
                 }
                 Button(onClick = {
                     val toEmails = splitEmails(toText)
+                    val subjFinal = formatSubjectWithTagHierarchies(subject, allHierarchies)
                     if (toEmails.isEmpty() || toEmails.any { '@' !in it }) {
-                        onSubmit(draft?.id, draft?.changeKey, toText, ccText, bccText, subject, body, attachments, true)
+                        onSubmit(draft?.id, draft?.changeKey, toText, ccText, bccText, subjFinal, body, attachments, true)
                     } else {
                         showSendConfirm = true
                     }
@@ -1747,7 +1789,8 @@ private fun DesktopCalendarPane(
     events: List<CalendarEvent>,
     onClose: () -> Unit,
     onRefresh: () -> Unit,
-    onCreateEvent: (String, String, String, String, String) -> Unit
+    onCreateEvent: (String, String, String, String, String) -> Unit,
+    onDeleteEvent: (CalendarEvent) -> Unit
 ) {
     var showCreate by remember { mutableStateOf(false) }
     if (showCreate) {
@@ -1789,10 +1832,18 @@ private fun DesktopCalendarPane(
         LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(events, key = { it.id }) { ev ->
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(ev.subject, fontWeight = FontWeight.Medium)
-                        Text("${formatMailDate(ev.startIso, true)} — ${formatMailDate(ev.endIso, true)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (ev.location.isNotBlank()) Text("Место: ${ev.location}", style = MaterialTheme.typography.labelSmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(ev.subject, fontWeight = FontWeight.Medium)
+                            Text("${formatMailDate(ev.startIso, true)} — ${formatMailDate(ev.endIso, true)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (ev.location.isNotBlank()) Text("Место: ${ev.location}", style = MaterialTheme.typography.labelSmall)
+                        }
+                        IconButton(onClick = { onDeleteEvent(ev) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Удалить")
+                        }
                     }
                 }
             }
@@ -1947,6 +1998,22 @@ private fun DesktopSettingsPane(
                     if (segs.size < 4) IconButton(onClick = { editingTpl = null to "$tpl/" }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Add, "Подтег", Modifier.size(16.dp)) }
                     IconButton(onClick = { editingTpl = tpl to tpl }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Edit, "Изменить", Modifier.size(16.dp)) }
                     IconButton(onClick = { onRemoveTagTemplate(tpl) }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Close, "Удалить", Modifier.size(16.dp)) }
+                }
+            }
+        }
+        val extraRules = s.tagSortRules.filter { rule ->
+            s.tagTemplates.none { it.equals(rule.tag, ignoreCase = true) }
+        }
+        extraRules.forEach { rule ->
+            val segPreview = rule.pathSegments().joinToString(", ", "[", "]") { "\"$it\"" }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("$segPreview → ${rule.targetFolderName}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                IconButton(onClick = { onRemoveTagSortRule(rule.tag) }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Close, "Удалить правило", Modifier.size(16.dp))
                 }
             }
         }

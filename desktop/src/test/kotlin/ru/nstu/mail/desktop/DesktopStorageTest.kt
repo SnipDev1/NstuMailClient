@@ -78,7 +78,7 @@ class DesktopStorageTest {
                 "draft": false,
                 "prerelease": true,
                 "body": "Older test",
-                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.6-test.9",
+                "html_url": "https://github.com/SnipDev1/NstuMailClient/releases/tag/v1.0.6-test.9",
                 "assets": []
               },
               {
@@ -86,7 +86,7 @@ class DesktopStorageTest {
                 "draft": false,
                 "prerelease": true,
                 "body": "Newest test",
-                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.6-test.13",
+                "html_url": "https://github.com/SnipDev1/NstuMailClient/releases/tag/v1.0.6-test.13",
                 "assets": []
               },
               {
@@ -94,7 +94,7 @@ class DesktopStorageTest {
                 "draft": false,
                 "prerelease": true,
                 "body": "Alpha",
-                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.7-alpha.2",
+                "html_url": "https://github.com/SnipDev1/NstuMailClient/releases/tag/v1.0.7-alpha.2",
                 "assets": []
               },
               {
@@ -102,7 +102,7 @@ class DesktopStorageTest {
                 "draft": false,
                 "prerelease": true,
                 "body": "Beta",
-                "html_url": "https://github.com/SnipDev1/NstuMailApk/releases/tag/v1.0.7-beta.1",
+                "html_url": "https://github.com/SnipDev1/NstuMailClient/releases/tag/v1.0.7-beta.1",
                 "assets": []
               }
             ]
@@ -174,5 +174,22 @@ class DesktopStorageTest {
         assertEquals(2, tbl.rows.size)
         assertEquals(2, tbl.rows[0].size)
         assertTrue(blocks.any { it is EmailBlock.ImageBlock && it.alt == "logo" })
+    }
+
+    @Test
+    fun `appendRecipientEmail appends cleanly without overwriting prior comma-separated recipients`() {
+        assertEquals("ivan@nstu.ru", appendRecipientEmail("iv", "ivan@nstu.ru"))
+        assertEquals(
+            "a@nstu.ru, ivan@nstu.ru",
+            appendRecipientEmail("a@nstu.ru, iv", "ivan@nstu.ru")
+        )
+        assertEquals(
+            "a@nstu.ru, b@nstu.ru",
+            appendRecipientEmail("a@nstu.ru; b@nstu.ru; B", "b@nstu.ru")
+        )
+        assertEquals(
+            "a@nstu.ru, b@nstu.ru",
+            appendRecipientEmail("a@nstu.ru, ", "b@nstu.ru")
+        )
     }
 }

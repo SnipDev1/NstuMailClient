@@ -17,6 +17,7 @@ import ru.nstu.mail.data.sortTagTemplatesHierarchically
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -85,6 +86,19 @@ private fun restrictOwnerOnly(file: File) {
     }
 }
 
+private fun writeAtomic(target: File, bytes: ByteArray, ownerOnly: Boolean) {
+    target.parentFile?.mkdirs()
+    val tmp = File(target.parentFile, "${target.name}.tmp")
+    tmp.writeBytes(bytes)
+    if (ownerOnly) restrictOwnerOnly(tmp)
+    try {
+        Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    } catch (_: Exception) {
+        Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+    }
+    if (ownerOnly) restrictOwnerOnly(target)
+}
+
 class DesktopCredentialStore(private val configDir: File = DesktopConfigPaths.defaultConfigDir()) {
     private val keyFile = File(configDir, "key.bin")
     private val credFile = File(configDir, "credentials.bin")
@@ -102,8 +116,7 @@ class DesktopCredentialStore(private val configDir: File = DesktopConfigPaths.de
             init(Cipher.ENCRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
         }
         val enc = cipher.doFinal(payload)
-        credFile.writeBytes(iv + enc)
-        restrictOwnerOnly(credFile)
+        writeAtomic(credFile, iv + enc, ownerOnly = true)
     }
 
     fun load(): Credentials? = runCatching {
@@ -227,7 +240,7 @@ class DesktopSettingsStore(private val configDir: File = DesktopConfigPaths.defa
             }
             put("updateChannel", settings.updateChannel.name)
         }
-        settingsFile.writeText(obj.toString(2), Charsets.UTF_8)
+        writeAtomic(settingsFile, obj.toString(2).toByteArray(Charsets.UTF_8), ownerOnly = false)
     }
 
     private fun JSONArray?.toStringSet(): Set<String> {

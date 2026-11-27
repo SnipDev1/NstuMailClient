@@ -40,17 +40,17 @@ import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.shouldNotifyForMessage
 import ru.nstu.mail.data.shouldRouteToUnsorted
 import ru.nstu.mail.data.sortTagTemplatesHierarchically
+import ru.nstu.mail.data.extractInitials
+import ru.nstu.mail.data.formatShortPersonName
+import ru.nstu.mail.data.needsNameResolution
+import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.notify.isMessageSeen
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.messageSeenKeys
 import ru.nstu.mail.notify.selectNewMessagesToNotify
 import ru.nstu.mail.notify.shouldProcessMonitoredMessage
-import ru.nstu.mail.ui.extractInitials
 import ru.nstu.mail.ui.finalizeRecipientToken
-import ru.nstu.mail.ui.formatShortPersonName
-import ru.nstu.mail.ui.needsNameResolution
 import ru.nstu.mail.ui.parseRecipientTokens
-import ru.nstu.mail.ui.resolveDisplayName
 import java.util.Base64
 
 class EwsXmlTest {
@@ -1375,5 +1375,73 @@ class EwsXmlTest {
         assertTrue(rendered.contains("#b71c1c"))
         assertTrue(rendered.contains("#ffffff"))
         assertTrue(ru.nstu.mail.data.DEFAULT_TAG_TEMPLATES.isEmpty())
+    }
+
+    @Test
+    fun `getItem parses parentFolderId and 0x5D01 fallback, markAllRead supports multi-folder, and transparent rgba is stripped in dark mode`() {
+        val getItemReq = EwsXml.buildGetItemRequest("item-42")
+        assertTrue(getItemReq.contains("""FieldURI="item:ParentFolderId""""))
+        assertTrue(getItemReq.contains("""PropertyTag="0x5D01""""))
+
+        val getItemXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                   xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:GetItemResponseMessage ResponseClass="Success">
+                      <m:Items>
+                        <t:Message>
+                          <t:ItemId Id="item-42" ChangeKey="ck-42"/>
+                          <t:ParentFolderId Id="folder-99"/>
+                          <t:Subject>Вложенное письмо</t:Subject>
+                          <t:Body BodyType="Text">Текст</t:Body>
+                          <t:ExtendedProperty>
+                            <t:ExtendedFieldURI PropertyTag="0x5d01" PropertyType="String"/>
+                            <t:Value>dean@corp.nstu.ru</t:Value>
+                          </t:ExtendedProperty>
+                          <t:From>
+                            <t:Mailbox>
+                              <t:Name>Деканат</t:Name>
+                              <t:EmailAddress>/O=EXCHANGELABS/CN=DEAN</t:EmailAddress>
+                            </t:Mailbox>
+                          </t:From>
+                          <t:Attachments>
+                            <t:ItemAttachment>
+                              <t:Name>Embedded</t:Name>
+                              <t:Message>
+                                <t:ItemId Id="inner-999" ChangeKey="inner-ck"/>
+                                <t:Subject>Внутреннее</t:Subject>
+                              </t:Message>
+                            </t:ItemAttachment>
+                          </t:Attachments>
+                          <t:IsRead>false</t:IsRead>
+                        </t:Message>
+                      </m:Items>
+                    </m:GetItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:GetItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val detail = EwsXml.parseGetItemResponse(getItemXml)
+        assertEquals("item-42", detail.id)
+        assertEquals("folder-99", detail.parentFolderId)
+        assertEquals("dean@corp.nstu.ru", detail.fromEmail)
+        assertEquals("Вложенное письмо", detail.subject)
+
+        val markAllReq = EwsXml.buildMarkAllReadRequest(listOf("f-1", "f-2", "f-1"))
+        assertTrue(markAllReq.contains("""<t:FolderId Id="f-1"/>"""))
+        assertTrue(markAllReq.contains("""<t:FolderId Id="f-2"/>"""))
+
+        val darkTransparent = EmailHtmlSanitizer.renderEmailDocument(
+            body = """<p style="color: rgba(0, 0, 0, 0)">Прозрачный текст</p>""",
+            isHtml = true,
+            darkMode = true,
+            bgHex = "#101512",
+            textHex = "#E0E4E0",
+            linkHex = "#5CDAA5"
+        )
+        assertFalse(darkTransparent.contains("rgba(0, 0, 0, 0)"))
     }
 }

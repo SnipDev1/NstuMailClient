@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-REPO="SnipDev1/NstuMailApk"
+REPO="SnipDev1/NstuMailClient"
 GRADLE_FILE="$ROOT_DIR/app/build.gradle.kts"
 KEYSTORE_PROPS="$ROOT_DIR/keystore.properties"
 DEFAULT_KEYSTORE="$HOME/.android/nstumail-release.jks"

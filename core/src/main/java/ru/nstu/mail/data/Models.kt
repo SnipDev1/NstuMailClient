@@ -90,7 +90,8 @@ data class EmailDetail(
     val isFlagged: Boolean = false,
     val importance: EmailImportance = EmailImportance.NORMAL,
     val isDraft: Boolean = false,
-    val attachments: List<AttachmentInfo>
+    val attachments: List<AttachmentInfo>,
+    val parentFolderId: String = ""
 )
 
 data class DownloadedAttachment(

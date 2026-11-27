@@ -38,7 +38,7 @@ val generateBuildInfo by tasks.registering {
 
             object DesktopBuildInfo {
                 const val VERSION_NAME = "$appVersionName"
-                const val GITHUB_REPO = "SnipDev1/NstuMailApk"
+                const val GITHUB_REPO = "SnipDev1/NstuMailClient"
             }
             """.trimIndent() + "\n"
         )

@@ -28,6 +28,9 @@ class EwsClient(private val credentials: Credentials) {
     @Volatile
     private var activeClient: OkHttpClient = buildHttpClient(parseInitialIdentity(credentials.email))
 
+    private val authLock = Any()
+
+    @Volatile
     private var fallbackTried = false
 
     @Volatile
@@ -115,9 +118,16 @@ class EwsClient(private val credentials: Credentials) {
         }
 
     suspend fun markAllRead(folderId: String) =
+        markAllRead(listOf(folderId))
+
+    suspend fun markAllRead(folderIds: List<String>) =
         withContext(Dispatchers.IO) {
-            val xml = postSoapWithAuthFallback(EwsXml.buildMarkAllReadRequest(folderId))
-            EwsXml.parseSimpleSuccessResponse(xml)
+            val cleanIds = folderIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (cleanIds.isEmpty()) return@withContext
+            for (chunk in cleanIds.chunked(20)) {
+                val xml = postSoapWithAuthFallback(EwsXml.buildMarkAllReadRequest(chunk))
+                EwsXml.parseSimpleSuccessResponse(xml)
+            }
         }
 
     // --- Messages ---
@@ -251,15 +261,19 @@ class EwsClient(private val credentials: Credentials) {
     suspend fun setRead(items: List<Pair<String, String>>, isRead: Boolean) =
         withContext(Dispatchers.IO) {
             if (items.isEmpty()) return@withContext
-            val xml = postSoapWithAuthFallback(EwsXml.buildSetReadRequest(items, isRead))
-            EwsXml.parseSimpleSuccessResponse(xml)
+            withStaleChangeKeyRetry(items) { curItems ->
+                val xml = postSoapWithAuthFallback(EwsXml.buildSetReadRequest(curItems, isRead))
+                EwsXml.parseSimpleSuccessResponse(xml)
+            }
         }
 
     suspend fun setFlagged(items: List<Pair<String, String>>, flagged: Boolean) =
         withContext(Dispatchers.IO) {
             if (items.isEmpty()) return@withContext
-            val xml = postSoapWithAuthFallback(EwsXml.buildSetFlagRequest(items, flagged))
-            EwsXml.parseSimpleSuccessResponse(xml)
+            withStaleChangeKeyRetry(items) { curItems ->
+                val xml = postSoapWithAuthFallback(EwsXml.buildSetFlagRequest(curItems, flagged))
+                EwsXml.parseSimpleSuccessResponse(xml)
+            }
         }
 
     suspend fun moveMessages(items: List<Pair<String, String>>, targetFolderId: String) {
@@ -271,24 +285,42 @@ class EwsClient(private val credentials: Credentials) {
         targetFolderId: String
     ): List<String> = withContext(Dispatchers.IO) {
         if (items.isEmpty()) return@withContext emptyList()
-        val xml = postSoapWithAuthFallback(EwsXml.buildMoveItemsRequest(items, targetFolderId))
-        EwsXml.parseSimpleSuccessResponse(xml)
-        EwsXml.parseMovedItemIds(xml)
+        withStaleChangeKeyRetry(items) { curItems ->
+            val xml = postSoapWithAuthFallback(EwsXml.buildMoveItemsRequest(curItems, targetFolderId))
+            EwsXml.parseSimpleSuccessResponse(xml)
+            EwsXml.parseMovedItemIds(xml)
+        }
     }
 
     suspend fun copyMessages(items: List<Pair<String, String>>, targetFolderId: String) =
         withContext(Dispatchers.IO) {
             if (items.isEmpty()) return@withContext
-            val xml = postSoapWithAuthFallback(EwsXml.buildCopyItemsRequest(items, targetFolderId))
-            EwsXml.parseSimpleSuccessResponse(xml)
+            withStaleChangeKeyRetry(items) { curItems ->
+                val xml = postSoapWithAuthFallback(EwsXml.buildCopyItemsRequest(curItems, targetFolderId))
+                EwsXml.parseSimpleSuccessResponse(xml)
+            }
         }
 
     suspend fun deleteMessages(items: List<Pair<String, String>>, hardDelete: Boolean) =
         withContext(Dispatchers.IO) {
             if (items.isEmpty()) return@withContext
-            val xml = postSoapWithAuthFallback(EwsXml.buildDeleteItemsRequest(items, hardDelete))
-            EwsXml.parseSimpleSuccessResponse(xml)
+            withStaleChangeKeyRetry(items) { curItems ->
+                val xml = postSoapWithAuthFallback(EwsXml.buildDeleteItemsRequest(curItems, hardDelete))
+                EwsXml.parseSimpleSuccessResponse(xml)
+            }
         }
+
+    private inline fun <T> withStaleChangeKeyRetry(
+        items: List<Pair<String, String>>,
+        action: (List<Pair<String, String>>) -> T
+    ): T {
+        return try {
+            action(items)
+        } catch (e: EwsException) {
+            if (e.isAuthError || items.none { it.second.isNotBlank() }) throw e
+            action(items.map { it.first to "" })
+        }
+    }
 
     // --- GAL / Contacts / Calendar ---
 
@@ -373,19 +405,13 @@ class EwsClient(private val credentials: Credentials) {
             val trimmed = email.trim()
             if ('@' !in trimmed) return@withContext null
             val url = buildUserPhotoUrl(baseUrl, trimmed, size)
+            val current = activeClient
             try {
-                executeGetBytes(activeClient, url)
+                executeGetBytes(current, url)
             } catch (e: EwsException) {
-                if (e.isAuthError && !fallbackTried && credentials.email.contains('@') &&
-                    !credentials.email.contains('\\')
-                ) {
-                    fallbackTried = true
-                    val local = credentials.email.substringBefore('@')
-                    val domain = credentials.email.substringAfter('@')
-                    val altClient = buildHttpClient(local to domain)
-                    val bytes = executeGetBytes(altClient, url)
-                    activeClient = altClient
-                    bytes
+                if (e.isAuthError) {
+                    val alt = getOrSwitchFallbackClient(current)
+                    if (alt != null) executeGetBytes(alt, url) else null
                 } else {
                     null
                 }
@@ -475,8 +501,11 @@ class EwsClient(private val credentials: Credentials) {
                 )
             }
             response.use { resp ->
-                if (resp.code == 401 || resp.code == 403 || resp.code == 404) {
-                    throw EwsException("Ошибка авторизации (${resp.code})", isAuthError = true)
+                if (resp.code == 401) {
+                    throw EwsException("Ошибка авторизации (401)", isAuthError = true)
+                }
+                if (resp.code == 403 || resp.code == 404) {
+                    throw EwsException("EWS недоступен (HTTP ${resp.code})", isAuthError = false)
                 }
                 if (resp.code != 200) {
                     throw EwsException("HTTP ошибка ${resp.code}")
@@ -490,6 +519,9 @@ class EwsClient(private val credentials: Credentials) {
                     val read = reader.read(charBuf)
                     if (read == -1) break
                     buffer.append(charBuf, 0, read)
+                    if (buffer.length > MAX_STREAM_BUFFER_CHARS) {
+                        throw EwsException("Потоковый ответ сервера превысил допустимый размер")
+                    }
                     while (true) {
                         val match = endRegex.find(buffer) ?: break
                         val startIdx = buffer.indexOf('<').coerceAtLeast(0)
@@ -509,20 +541,28 @@ class EwsClient(private val credentials: Credentials) {
 
     // --- Transport ---
 
+    private fun getOrSwitchFallbackClient(failedClient: OkHttpClient): OkHttpClient? {
+        if (!credentials.email.contains('@') || credentials.email.contains('\\')) return null
+        synchronized(authLock) {
+            if (activeClient !== failedClient) return activeClient
+            if (fallbackTried) return null
+            fallbackTried = true
+            val local = credentials.email.substringBefore('@')
+            val domain = credentials.email.substringAfter('@')
+            val altClient = buildHttpClient(local to domain)
+            activeClient = altClient
+            return altClient
+        }
+    }
+
     private fun postSoapWithAuthFallback(soapBody: String): String {
+        val currentClient = activeClient
         return try {
-            executeSoap(activeClient, soapBody)
+            executeSoap(currentClient, soapBody)
         } catch (e: EwsException) {
-            if (e.isAuthError && !fallbackTried && credentials.email.contains('@') &&
-                !credentials.email.contains('\\')
-            ) {
-                fallbackTried = true
-                val local = credentials.email.substringBefore('@')
-                val domain = credentials.email.substringAfter('@')
-                val altClient = buildHttpClient(local to domain)
-                val result = executeSoap(altClient, soapBody)
-                activeClient = altClient
-                result
+            if (e.isAuthError) {
+                val alt = getOrSwitchFallbackClient(currentClient)
+                if (alt != null) executeSoap(alt, soapBody) else throw e
             } else {
                 throw e
             }
@@ -555,7 +595,7 @@ class EwsClient(private val credentials: Credentials) {
                 )
                 403, 404 -> throw EwsException(
                     "EWS недоступен (HTTP ${resp.code}). Проверьте адрес сервера.",
-                    isAuthError = true
+                    isAuthError = false
                 )
                 500 -> {
                     if (bodyStr.contains("Fault", ignoreCase = true)) bodyStr
@@ -596,6 +636,7 @@ class EwsClient(private val credentials: Credentials) {
     companion object {
         private val XML_MEDIA_TYPE = "text/xml; charset=utf-8".toMediaType()
         private const val MAX_AVATAR_BYTES = 2 * 1024 * 1024L
+        private const val MAX_STREAM_BUFFER_CHARS = 2 * 1024 * 1024
 
         fun buildUserPhotoUrl(baseUrl: String, email: String, size: String = "HR96x96"): HttpUrl =
             baseUrl.toHttpUrl()

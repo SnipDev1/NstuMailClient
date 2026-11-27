@@ -6,7 +6,10 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONObject
 import java.security.KeyStore
+import javax.crypto.AEADBadTagException
+import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
+import javax.crypto.IllegalBlockSizeException
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
@@ -48,8 +51,15 @@ class CredentialStore(context: Context) {
             val serverUrl = obj.optString("serverUrl", DEFAULT_SERVER_URL)
             if (email.isBlank() || password.isEmpty()) null
             else Credentials(email = email, password = password, serverUrl = serverUrl)
-        }.getOrElse {
-            clear()
+        }.getOrElse { err ->
+            val corrupted = err is AEADBadTagException ||
+                err is BadPaddingException ||
+                err is IllegalBlockSizeException ||
+                err is IllegalArgumentException ||
+                err is org.json.JSONException
+            if (corrupted) {
+                clear()
+            }
             null
         }
     }

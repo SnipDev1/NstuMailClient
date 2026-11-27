@@ -69,7 +69,9 @@ sealed interface DesktopRightPane {
         val replyTo: EmailDetail? = null,
         val replyAll: Boolean = false,
         val isForward: Boolean = false,
-        val draft: EmailDetail? = null
+        val draft: EmailDetail? = null,
+        val prefillTo: String? = null,
+        val prefillName: String? = null
     ) : DesktopRightPane
     data object Contacts : DesktopRightPane
     data object Calendar : DesktopRightPane
@@ -124,11 +126,18 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     val loadingProfiles: StateFlow<Set<String>> = _loadingProfiles.asStateFlow()
     private val requestedProfiles = Collections.synchronizedSet(mutableSetOf<String>())
 
-    private val seenInboxIds = Collections.synchronizedSet(mutableSetOf<String>())
+    private val seenKeysOrder = ArrayDeque<String>()
+    private val seenKeysSet = HashSet<String>()
+    private val baselinedFolderIds = HashSet<String>()
+    private val seenLock = Any()
     @Volatile
     private var baselineInitialized = false
+    @Volatile
+    private var lastSyncMs: Long = 0L
 
     private var client: EwsClient? = null
+    private var loadMessagesJob: Job? = null
+    private var nextPageOffset: Int = 0
     private var pushJob: Job? = null
     private var directoryJob: Job? = null
     private var updateCheckJob: Job? = null
@@ -147,6 +156,49 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         directoryJob?.cancel()
         updateCheckJob?.cancel()
         scope.cancel()
+    }
+
+    private fun seenKeysFor(msg: EmailSummary): List<String> = buildList {
+        if (msg.id.isNotBlank()) add(msg.id)
+        val mid = msg.internetMessageId.trim().lowercase()
+        if (mid.isNotEmpty()) {
+            add("mid:$mid")
+        } else {
+            val subj = msg.subject.trim().lowercase()
+            val recv = msg.receivedAt.trim()
+            if (recv.isNotEmpty()) add("sr:$subj|$recv")
+        }
+    }
+
+    private fun groupKeyFor(msg: EmailSummary): String {
+        val mid = msg.internetMessageId.trim().lowercase()
+        if (mid.isNotEmpty()) return "mid:$mid"
+        val subj = msg.subject.trim().lowercase()
+        val recv = msg.receivedAt.trim()
+        if (subj.isNotEmpty() || recv.isNotEmpty()) return "sr:$subj|$recv"
+        return "id:${msg.id}"
+    }
+
+    private fun recordSeenKeys(keys: Iterable<String>) {
+        synchronized(seenLock) {
+            for (k in keys) {
+                if (k.isBlank() || !seenKeysSet.add(k)) continue
+                seenKeysOrder.addLast(k)
+                while (seenKeysOrder.size > MAX_SEEN_KEYS) {
+                    val removed = seenKeysOrder.removeFirst()
+                    seenKeysSet.remove(removed)
+                }
+            }
+        }
+    }
+
+    private fun recordSeenMessages(messages: List<EmailSummary>, folderIds: Collection<String> = emptyList()) {
+        recordSeenKeys(messages.flatMap(::seenKeysFor))
+        synchronized(seenLock) {
+            baselinedFolderIds.addAll(folderIds.filter { it.isNotBlank() })
+            if (lastSyncMs <= 0L) lastSyncMs = System.currentTimeMillis()
+            baselineInitialized = true
+        }
     }
 
     private fun updateSettings(transform: (DesktopSettings) -> DesktopSettings) {
@@ -206,9 +258,9 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
                 if (inbox?.systemKind == SystemFolderKind.INBOX) {
                     updateSettings { it.copy(inboxFolderId = inbox.id) }
-                    seenInboxIds.addAll(items.map { it.id })
-                    baselineInitialized = true
+                    recordSeenMessages(items, listOf(inbox.id))
                 }
+                nextPageOffset = PAGE_SIZE
                 scope.launch {
                     runCatching { newClient.getRecipientCache() }
                         .onSuccess { cache -> rememberKnownNames(cache.map { it.email to it.name }) }
@@ -243,6 +295,28 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         }
     }
 
+    private suspend fun resolveMonitoredFolders(activeClient: EwsClient): Triple<String?, List<String>, MutableList<MailFolder>?> {
+        val folders = runCatching { activeClient.getFolders(includeSubtreeCounts = false).toMutableList() }.getOrNull()
+        val inboxId = folders?.firstOrNull { it.systemKind == SystemFolderKind.INBOX }?.id
+            ?: _state.value.settings.inboxFolderId
+        val rules = _state.value.settings.tagSortRules
+        val activeIds = folders?.map { it.id }?.toSet().orEmpty()
+        val ruleFolderIds = if (folders != null) {
+            rules.flatMap { rule ->
+                if (rule.targetFolderId !in activeIds) emptyList()
+                else if (rule.autoCreateSubfolders) collectSubtreeFolderIds(folders, rule.targetFolderId)
+                else listOf(rule.targetFolderId)
+            }
+        } else {
+            rules.map { it.targetFolderId }.filter { it.isNotBlank() }
+        }
+        val unsortedId = folders?.firstOrNull {
+            !it.isSystem && it.displayName.equals(UNSORTED_FOLDER_NAME, ignoreCase = true)
+        }?.id
+        val monitored = (listOfNotNull(inboxId) + ruleFolderIds + listOfNotNull(unsortedId)).distinct()
+        return Triple(inboxId, monitored, folders)
+    }
+
     private fun startPushLoop(activeClient: EwsClient) {
         pushJob?.cancel()
         pushJob = scope.launch(Dispatchers.IO) {
@@ -251,13 +325,26 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 var subscriptionId = ""
                 try {
                     checkUnreadAndNotify(activeClient)
-                    subscriptionId = activeClient.createStreamingSubscription()
+                    val (_, monitoredFolderIds, _) = resolveMonitoredFolders(activeClient)
+                    subscriptionId = activeClient.createStreamingSubscription(
+                        folderIds = monitoredFolderIds,
+                        subscribeAllFolders = true
+                    )
                     backoffMs = 5_000L
                     while (isActive && client === activeClient && subscriptionId.isNotBlank()) {
                         var invalid = false
                         activeClient.streamInboxEvents(subscriptionId, timeoutMinutes = 25) { chunk ->
                             if (chunk.newMailItemIds.isNotEmpty()) {
-                                checkUnreadAndNotify(activeClient)
+                                val sysMap = activeClient.getCachedSystemFolderIds()
+                                val monitoredSet = monitoredFolderIds.toSet()
+                                val onlyIgnored = chunk.eventFolderIds.isNotEmpty() &&
+                                    chunk.eventFolderIds.all { fid ->
+                                        val kind = sysMap[fid]
+                                        fid !in monitoredSet && kind != null && kind != SystemFolderKind.INBOX
+                                    }
+                                if (!onlyIgnored) {
+                                    checkUnreadAndNotify(activeClient)
+                                }
                             }
                             if (chunk.subscriptionInvalid) invalid = true
                         }
@@ -282,60 +369,117 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     }
 
     private suspend fun checkUnreadAndNotify(activeClient: EwsClient) {
-        val unread = runCatching { activeClient.listInboxUnread(pageSize = 15) }.getOrNull() ?: return
-        val newItems = if (!baselineInitialized) {
-            seenInboxIds.addAll(unread.map { it.id })
-            baselineInitialized = true
-            emptyList()
-        } else {
-            val fresh = unread.filter { it.id.isNotBlank() && it.id !in seenInboxIds }
-            seenInboxIds.addAll(unread.map { it.id })
-            fresh
+        val (savedInboxId, monitoredIds, initialCache) = resolveMonitoredFolders(activeClient)
+        if (!savedInboxId.isNullOrBlank() && _state.value.settings.inboxFolderId != savedInboxId) {
+            withContext(Dispatchers.Main) { updateSettings { it.copy(inboxFolderId = savedInboxId) } }
         }
-        if (newItems.isEmpty()) return
+        val unread = runCatching {
+            if (monitoredIds.isNotEmpty()) {
+                activeClient.listUnreadInFolders(monitoredIds, pageSizePerFolder = 15)
+            } else {
+                activeClient.listInboxUnread(pageSize = 15)
+            }
+        }.getOrNull() ?: return
 
-        var cache: MutableList<MailFolder>? = null
+        val grouped = LinkedHashMap<String, Pair<EmailSummary, MutableSet<String>>>()
+        for (msg in unread) {
+            if (msg.id.isBlank()) continue
+            val key = groupKeyFor(msg)
+            val fid = msg.parentFolderId.trim()
+            val entry = grouped[key]
+            if (entry == null) {
+                val fids = mutableSetOf<String>()
+                if (fid.isNotEmpty()) fids += fid
+                grouped[key] = msg to fids
+            } else {
+                if (fid.isNotEmpty()) entry.second += fid
+                if (savedInboxId != null && fid == savedInboxId && entry.first.parentFolderId != savedInboxId) {
+                    grouped[key] = msg to entry.second
+                }
+            }
+        }
+
+        val (wasInitialized, seenSnapshot, baselinedSnapshot, prevSyncMs) = synchronized(seenLock) {
+            listOf(baselineInitialized, seenKeysSet.toSet(), baselinedFolderIds.toSet(), lastSyncMs)
+        }
+        val initFlag = wasInitialized as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val seenCopy = seenSnapshot as Set<String>
+        @Suppress("UNCHECKED_CAST")
+        val baselinedCopy = baselinedSnapshot as Set<String>
+        val syncMs = prevSyncMs as Long
+
+        val incomingKeys = unread.flatMap(::seenKeysFor).toMutableList()
+        var cache: MutableList<MailFolder>? = initialCache
         val stSettings = _state.value.settings
-        val savedInboxId = stSettings.inboxFolderId
         var mutedFolders = stSettings.mutedFolderIds
         val toNotify = mutableListOf<EmailSummary>()
         var anyMoved = false
 
-        for (msg in newItems) {
-            val (outcome, nextCache) = DesktopAutoSorter.applyAutoSortForMessage(
-                settingsStore = settingsStore,
-                client = activeClient,
-                msg = msg,
-                rules = stSettings.tagSortRules,
-                inboxFolderId = savedInboxId,
-                foldersCache = cache
-            )
-            cache = nextCache
-            if (outcome.movedFromInbox || outcome.foldersChanged) anyMoved = true
-            if (outcome.foldersChanged) mutedFolders = settingsStore.load().mutedFolderIds
+        if (initFlag) {
+            for ((repMsg, sourceFolderIds) in grouped.values) {
+                if (seenKeysFor(repMsg).any { it in seenCopy }) continue
+                val inInbox = (savedInboxId != null && savedInboxId in sourceFolderIds) || sourceFolderIds.isEmpty()
+                val shouldProcess = if (inInbox || sourceFolderIds.any { it in baselinedCopy }) {
+                    true
+                } else if (syncMs > 0L) {
+                    val recMs = runCatching { Instant.parse(repMsg.receivedAt.trim()).toEpochMilli() }.getOrNull()
+                    recMs != null && recMs >= (syncMs - 5L * 60_000L)
+                } else {
+                    false
+                }
+                if (!shouldProcess) continue
 
-            val shouldNotify = stSettings.notificationsEnabled && if (outcome.targetFolderIds.isNotEmpty()) {
-                outcome.targetFolderIds.any { fid ->
+                val effectiveFolderIds: List<String>
+                if (inInbox) {
+                    val (outcome, nextCache) = DesktopAutoSorter.applyAutoSortForMessage(
+                        settingsStore = settingsStore,
+                        client = activeClient,
+                        msg = repMsg,
+                        rules = stSettings.tagSortRules,
+                        inboxFolderId = savedInboxId,
+                        foldersCache = cache
+                    )
+                    cache = nextCache
+                    if (outcome.movedFromInbox || outcome.foldersChanged) anyMoved = true
+                    if (outcome.foldersChanged) mutedFolders = settingsStore.load().mutedFolderIds
+                    incomingKeys += outcome.movedItemIds
+                    synchronized(seenLock) { baselinedFolderIds.addAll(outcome.targetFolderIds) }
+                    effectiveFolderIds = outcome.targetFolderIds.ifEmpty { listOfNotNull(savedInboxId) }
+                } else {
+                    effectiveFolderIds = sourceFolderIds.toList()
+                }
+
+                val shouldNotify = stSettings.notificationsEnabled && if (effectiveFolderIds.isNotEmpty()) {
+                    effectiveFolderIds.any { fid ->
+                        shouldNotifyForMessage(
+                            senderEmail = repMsg.senderEmail,
+                            effectiveFolderId = fid,
+                            isInbox = (fid == savedInboxId),
+                            savedInboxFolderId = savedInboxId,
+                            mutedFolderIds = mutedFolders,
+                            mutedSenders = stSettings.mutedSenders
+                        )
+                    }
+                } else {
                     shouldNotifyForMessage(
-                        senderEmail = msg.senderEmail,
-                        effectiveFolderId = fid,
-                        isInbox = (fid == savedInboxId),
+                        senderEmail = repMsg.senderEmail,
+                        effectiveFolderId = savedInboxId,
+                        isInbox = true,
                         savedInboxFolderId = savedInboxId,
                         mutedFolderIds = mutedFolders,
                         mutedSenders = stSettings.mutedSenders
                     )
                 }
-            } else {
-                shouldNotifyForMessage(
-                    senderEmail = msg.senderEmail,
-                    effectiveFolderId = savedInboxId,
-                    isInbox = true,
-                    savedInboxFolderId = savedInboxId,
-                    mutedFolderIds = mutedFolders,
-                    mutedSenders = stSettings.mutedSenders
-                )
+                if (shouldNotify) toNotify += repMsg
             }
-            if (shouldNotify) toNotify += msg
+        }
+
+        recordSeenKeys(incomingKeys)
+        synchronized(seenLock) {
+            baselinedFolderIds.addAll(monitoredIds)
+            lastSyncMs = System.currentTimeMillis()
+            baselineInitialized = true
         }
 
         if (toNotify.isNotEmpty()) {
@@ -352,7 +496,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             DesktopNotificationPoster.notify(title, body)
         }
 
-        if (anyMoved || _state.value.currentFolder?.systemKind == SystemFolderKind.INBOX) {
+        if (anyMoved || toNotify.isNotEmpty() || _state.value.currentFolder?.systemKind == SystemFolderKind.INBOX) {
             withContext(Dispatchers.Main) {
                 refresh(quiet = true)
             }
@@ -412,11 +556,10 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     fun loadMore() {
         val st = _state.value
         if (st.isLoading || st.reachedEnd) return
-        loadMessages(offset = st.messages.size, reset = false)
+        loadMessages(offset = nextPageOffset, reset = false)
     }
 
-    private fun targetFolderIdsForQuery(): List<String> {
-        val st = _state.value
+    private fun targetFolderIdsForQuery(st: DesktopUiState = _state.value): List<String> {
         return when {
             st.searchQuery.isNotBlank() && st.searchAllFolders ->
                 st.folders
@@ -432,11 +575,15 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     private fun loadMessages(offset: Int, reset: Boolean, asPullRefresh: Boolean = false) {
         val c = client ?: return
-        val folderIds = targetFolderIdsForQuery()
-        val query = _state.value.searchQuery
-        val filter = _state.value.filter
+        if (reset) {
+            loadMessagesJob?.cancel()
+            nextPageOffset = 0
+        }
+        val snapshot = _state.value
+        val query = snapshot.searchQuery
+        val filter = snapshot.filter
 
-        scope.launch {
+        loadMessagesJob = scope.launch {
             _state.update {
                 it.copy(isLoading = !asPullRefresh, isRefreshing = asPullRefresh, errorMessage = null)
             }
@@ -481,11 +628,9 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                     }
                 }
 
-                val effectiveIds = if (folderIds.isEmpty() && updatedCurrent != null) {
-                    listOf(updatedCurrent.id)
-                } else {
-                    folderIds
-                }
+                val effectiveIds = targetFolderIdsForQuery(
+                    _state.value.copy(folders = folders, currentFolder = updatedCurrent)
+                ).ifEmpty { listOfNotNull(updatedCurrent?.id) }
 
                 val (items, includesLast) = c.listMessages(
                     folderIds = effectiveIds,
@@ -494,6 +639,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                     query = query,
                     filter = filter
                 )
+                nextPageOffset = offset + PAGE_SIZE
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
                 if (inbox != null && _state.value.settings.inboxFolderId != inbox.id) {
                     updateSettings { it.copy(inboxFolderId = inbox.id) }
@@ -503,8 +649,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                     query.isBlank() &&
                     filter == MailFilter.ALL
                 ) {
-                    seenInboxIds.addAll(items.map { it.id })
-                    baselineInitialized = true
+                    recordSeenMessages(items, listOf(updatedCurrent.id))
                 }
                 _state.update { st ->
                     val merged = when {
@@ -549,6 +694,9 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                     settingsStore, c, item, rules, inboxId, cache
                 )
                 cache = nextCache
+                if (out.movedItemIds.isNotEmpty()) {
+                    recordSeenKeys(out.movedItemIds)
+                }
                 if (out.foldersChanged) folderListChanged = true
                 if (out.movedFromInbox) movedIds += item.id
                 if (sortError == null && out.errorMessage != null) sortError = out.errorMessage
@@ -556,8 +704,11 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             if (movedIds.isNotEmpty() || folderListChanged) {
                 val folders = runCatching { c.getFolders() }.getOrNull()
                 _state.update { st ->
+                    val nextFolders = folders ?: st.folders
+                    val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
                     st.copy(
-                        folders = folders ?: st.folders,
+                        folders = nextFolders,
+                        currentFolder = nextCur,
                         settings = settingsStore.load(),
                         messages = st.messages.filterNot { it.id in movedIds }
                     )
@@ -594,6 +745,13 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             _state.update { it.copy(isLoading = true) }
             try {
                 c.renameFolder(folder.id, folder.changeKey, trimmed)
+                updateSettings { st ->
+                    st.copy(
+                        tagSortRules = st.tagSortRules.map { r ->
+                            if (r.targetFolderId == folder.id) r.copy(targetFolderName = trimmed) else r
+                        }
+                    )
+                }
                 val folders = c.getFolders()
                 val cur = _state.value.currentFolder?.let { old -> folders.firstOrNull { it.id == old.id } ?: old }
                 _state.update { it.copy(isLoading = false, folders = folders, currentFolder = cur, toastMessage = "Папка переименована") }
@@ -606,10 +764,17 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     fun deleteFolder(folder: MailFolder) {
         val c = client ?: return
         if (folder.isSystem) return
+        val deletedIds = collectSubtreeFolderIds(_state.value.folders, folder.id).toSet()
         scope.launch {
             _state.update { it.copy(isLoading = true) }
             try {
                 c.deleteFolder(folder.id, folder.changeKey)
+                updateSettings { st ->
+                    st.copy(
+                        mutedFolderIds = st.mutedFolderIds - deletedIds,
+                        tagSortRules = st.tagSortRules.filterNot { it.targetFolderId in deletedIds }
+                    )
+                }
                 val folders = c.getFolders()
                 val fallback = folders.firstOrNull { it.systemKind == SystemFolderKind.INBOX } ?: folders.firstOrNull()
                 val curId = _state.value.currentFolder?.id
@@ -658,11 +823,17 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     fun markAllReadInCurrentFolder() {
         val c = client ?: return
-        val folder = _state.value.currentFolder ?: return
+        val stSnapshot = _state.value
+        val folder = stSnapshot.currentFolder ?: return
+        val targetIds = if (stSnapshot.includeSubfoldersInFolder) {
+            collectSubtreeFolderIds(stSnapshot.folders, folder.id).ifEmpty { listOf(folder.id) }
+        } else {
+            listOf(folder.id)
+        }
         scope.launch {
             _state.update { it.copy(isLoading = true) }
             try {
-                c.markAllRead(folder.id)
+                c.markAllRead(targetIds)
                 val folders = c.getFolders()
                 val updated = folders.firstOrNull { it.id == folder.id } ?: folder
                 _state.update { st ->
@@ -731,9 +902,10 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         e to n
                     }
                 )
+                val targetFolderId = detail.parentFolderId.ifBlank { _state.value.currentFolder?.id }
                 _state.update { st ->
                     val nextFolders = if (markedRead) {
-                        adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, -1)
+                        adjustFolderUnreadDelta(st.folders, targetFolderId, -1)
                     } else {
                         st.folders
                     }
@@ -747,7 +919,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         rightPane = DesktopRightPane.MessageDetail
                     )
                 }
-                if (markedRead) refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
+                if (markedRead) refreshSubtreeFoldersIfNested(c, targetFolderId)
             } catch (e: Exception) {
                 _state.update { it.copy(isLoading = false, toastMessage = e.message ?: "Не удалось открыть письмо") }
             }
@@ -780,12 +952,13 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     fun toggleReadDetail(detail: EmailDetail) {
         val c = client ?: return
         val next = !detail.isRead
+        val targetFolderId = detail.parentFolderId.ifBlank { _state.value.currentFolder?.id }
         scope.launch {
             try {
                 c.setRead(listOf(detail.id to detail.changeKey), next)
                 _state.update { st ->
                     val delta = if (next) -1 else 1
-                    val nextFolders = adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, delta)
+                    val nextFolders = adjustFolderUnreadDelta(st.folders, targetFolderId, delta)
                     val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
                     st.copy(
                         folders = nextFolders,
@@ -795,7 +968,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         toastMessage = if (next) "Отмечено прочитанным" else "Отмечено непрочитанным"
                     )
                 }
-                refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
+                refreshSubtreeFoldersIfNested(c, targetFolderId)
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
             }
@@ -847,8 +1020,11 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 c.moveMessages(listOf(detail.id to detail.changeKey), target.id)
                 val folders = runCatching { c.getFolders() }.getOrNull()
                 _state.update { st ->
+                    val nextFolders = folders ?: st.folders
+                    val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
                     st.copy(
-                        folders = folders ?: st.folders,
+                        folders = nextFolders,
+                        currentFolder = nextCur,
                         selectedMessage = null,
                         rightPane = DesktopRightPane.Empty,
                         messages = st.messages.filterNot { it.id == detail.id },
@@ -862,8 +1038,11 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     }
 
     fun toggleSpamDetail(detail: EmailDetail) {
-        val inJunk = _state.value.currentFolder?.systemKind == SystemFolderKind.JUNK
-        val target = _state.value.folders.firstOrNull {
+        val st = _state.value
+        val junkId = st.folders.firstOrNull { it.systemKind == SystemFolderKind.JUNK }?.id
+        val inJunk = st.currentFolder?.systemKind == SystemFolderKind.JUNK ||
+            (junkId != null && detail.parentFolderId == junkId)
+        val target = st.folders.firstOrNull {
             it.systemKind == if (inJunk) SystemFolderKind.INBOX else SystemFolderKind.JUNK
         } ?: return
         moveDetail(detail, target)
@@ -871,14 +1050,20 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     fun deleteDetail(detail: EmailDetail) {
         val c = client ?: return
-        val hardDelete = _state.value.currentFolder?.systemKind == SystemFolderKind.DELETED
+        val stSnapshot = _state.value
+        val deletedId = stSnapshot.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }?.id
+        val hardDelete = stSnapshot.currentFolder?.systemKind == SystemFolderKind.DELETED ||
+            (deletedId != null && detail.parentFolderId == deletedId)
         scope.launch {
             try {
                 c.deleteMessages(listOf(detail.id to detail.changeKey), hardDelete)
                 val folders = runCatching { c.getFolders() }.getOrNull()
                 _state.update { st ->
+                    val nextFolders = folders ?: st.folders
+                    val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
                     st.copy(
-                        folders = folders ?: st.folders,
+                        folders = nextFolders,
+                        currentFolder = nextCur,
                         selectedMessage = null,
                         rightPane = DesktopRightPane.Empty,
                         messages = st.messages.filterNot { it.id == detail.id },
@@ -898,8 +1083,8 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 val downloaded = c.downloadAttachment(att.id)
                 val safeName = sanitizeFilename(downloaded.name.ifBlank { att.name })
                 if (openAfter) {
-                    val tmpDir = Files.createTempDirectory("nstumail-att").toFile()
-                    val tmpFile = File(tmpDir, safeName)
+                    val tmpDir = Files.createTempDirectory("nstumail-att").toFile().apply { deleteOnExit() }
+                    val tmpFile = File(tmpDir, safeName).apply { deleteOnExit() }
                     withContext(Dispatchers.IO) { tmpFile.writeBytes(downloaded.bytes) }
                     withContext(Dispatchers.IO) {
                         if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(tmpFile)
@@ -930,28 +1115,17 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         prefillTo: String? = null,
         prefillName: String? = null
     ) {
-        val effectiveReplyTo = if (prefillTo != null && replyTo == null && draft == null) {
-            EmailDetail(
-                id = "",
-                changeKey = "",
-                subject = "",
-                from = prefillName?.takeIf { it.isNotBlank() } ?: prefillTo,
-                fromEmail = prefillTo,
-                to = emptyList(),
-                cc = emptyList(),
-                receivedAt = "",
-                body = "",
-                isHtml = false,
-                isRead = true,
-                attachments = emptyList()
-            )
-        } else {
-            replyTo
-        }
         _state.update {
             it.copy(
                 directorySuggestions = emptyList(),
-                rightPane = DesktopRightPane.Compose(effectiveReplyTo, replyAll, isForward, draft)
+                rightPane = DesktopRightPane.Compose(
+                    replyTo = replyTo,
+                    replyAll = replyAll,
+                    isForward = isForward,
+                    draft = draft,
+                    prefillTo = prefillTo,
+                    prefillName = prefillName
+                )
             )
         }
     }
@@ -1015,9 +1189,14 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             _state.update { it.copy(isSending = true) }
             try {
                 val outgoing = withContext(Dispatchers.IO) {
+                    var totalSize = 0L
                     attachments.map { file ->
+                        val len = file.length()
+                        if (len > MAX_SINGLE_UPLOAD_BYTES) throw EwsException("Файл ${file.name} превышает 20 МБ")
+                        totalSize += len
+                        if (totalSize > MAX_TOTAL_UPLOAD_BYTES) throw EwsException("Суммарный размер вложений превышает 25 МБ")
                         val bytes = file.readBytes()
-                        if (bytes.size > 20 * 1024 * 1024) throw EwsException("Файл ${file.name} превышает 20 МБ")
+                        if (bytes.size > MAX_SINGLE_UPLOAD_BYTES) throw EwsException("Файл ${file.name} превышает 20 МБ")
                         val mime = Files.probeContentType(file.toPath()) ?: "application/octet-stream"
                         OutgoingAttachment(sanitizeFilename(file.name), mime, bytes)
                     }
@@ -1096,6 +1275,23 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 _state.update { it.copy(toastMessage = "Событие создано") }
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Не удалось создать событие") }
+            }
+        }
+    }
+
+    fun deleteCalendarEvent(event: CalendarEvent) {
+        val c = client ?: return
+        scope.launch {
+            try {
+                c.deleteMessages(listOf(event.id to event.changeKey), hardDelete = false)
+                _state.update { st ->
+                    st.copy(
+                        calendarEvents = st.calendarEvents.filterNot { it.id == event.id },
+                        toastMessage = "Событие удалено"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Не удалось удалить событие") }
             }
         }
     }
@@ -1345,6 +1541,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             for (item in items.filter { matchAllAutoSortRules(it.subject, rules).isNotEmpty() }) {
                 val (out, next) = DesktopAutoSorter.applyAutoSortForMessage(settingsStore, c, item, rules, src.id, cache)
                 cache = next
+                if (out.movedItemIds.isNotEmpty()) recordSeenKeys(out.movedItemIds)
                 if (out.movedFromInbox) moved++
             }
         }
@@ -1443,16 +1640,33 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     fun logout() {
         pushJob?.cancel()
+        loadMessagesJob?.cancel()
+        directoryJob?.cancel()
+        updateCheckJob?.cancel()
+        nextPageOffset = 0
         client = null
         credStore.clear()
-        seenInboxIds.clear()
-        baselineInitialized = false
+        synchronized(seenLock) {
+            seenKeysOrder.clear()
+            seenKeysSet.clear()
+            baselinedFolderIds.clear()
+            lastSyncMs = 0L
+            baselineInitialized = false
+        }
         requestedAvatars.clear()
         requestedProfiles.clear()
         _avatars.value = emptyMap()
         _personProfiles.value = emptyMap()
         _knownNames.value = emptyMap()
         _loadingProfiles.value = emptySet()
+        updateSettings { st ->
+            st.copy(
+                mutedFolderIds = emptySet(),
+                mutedSenders = emptySet(),
+                tagSortRules = emptyList(),
+                inboxFolderId = null
+            )
+        }
         _state.value = DesktopUiState(settings = settingsStore.load())
     }
 
@@ -1463,5 +1677,8 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
     companion object {
         private const val PAGE_SIZE = 25
         private const val RESORT_PAGE_SIZE = 200
+        private const val MAX_SEEN_KEYS = 600
+        private const val MAX_SINGLE_UPLOAD_BYTES = 20L * 1024L * 1024L
+        private const val MAX_TOTAL_UPLOAD_BYTES = 25L * 1024L * 1024L
     }
 }

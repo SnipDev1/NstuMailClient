@@ -278,14 +278,20 @@ object EwsXml {
         )
     }
 
-    fun buildMarkAllReadRequest(folderId: String): String {
+    fun buildMarkAllReadRequest(folderId: String): String =
+        buildMarkAllReadRequest(listOf(folderId))
+
+    fun buildMarkAllReadRequest(folderIds: List<String>): String {
+        val idsXml = folderIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct().joinToString("\n        ") {
+            """<t:FolderId Id="${escapeXml(it)}"/>"""
+        }
         return wrapSoap(
             """
             <m:MarkAllItemsAsRead>
               <m:ReadFlag>true</m:ReadFlag>
               <m:SuppressReadReceipts>true</m:SuppressReadReceipts>
               <m:FolderIds>
-                <t:FolderId Id="${escapeXml(folderId)}"/>
+                $idsXml
               </m:FolderIds>
             </m:MarkAllItemsAsRead>
             """.trimIndent()
@@ -446,11 +452,14 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Importance"/>
                   <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="item:IsDraft"/>
+                  <t:FieldURI FieldURI="item:ParentFolderId"/>
                   <t:FieldURI FieldURI="message:From"/>
                   <t:FieldURI FieldURI="message:ToRecipients"/>
                   <t:FieldURI FieldURI="message:CcRecipients"/>
                   <t:FieldURI FieldURI="message:BccRecipients"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
+                  <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
+                  <t:ExtendedFieldURI PropertyTag="0x5D02" PropertyType="String"/>
                 </t:AdditionalProperties>
               </m:ItemShape>
               <m:ItemIds>
@@ -1188,21 +1197,8 @@ object EwsXml {
         val senderName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
         var senderEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
         if ('@' !in senderEmail) {
-            val extProps = msg.getElementsByTagNameNS(EWS_TYPES, "ExtendedProperty")
-            for (j in 0 until extProps.length) {
-                val ep = extProps.item(j) as? Element ?: continue
-                val tag = ep.firstChildElement(EWS_TYPES, "ExtendedFieldURI")
-                    ?.getAttribute("PropertyTag").orEmpty()
-                if (tag.equals("0x5d01", ignoreCase = true) ||
-                    tag.equals("0x5d02", ignoreCase = true)
-                ) {
-                    val candidate = ep.firstChildText(EWS_TYPES, "Value")
-                    if ('@' in candidate) {
-                        senderEmail = candidate
-                        break
-                    }
-                }
-            }
+            val fallback = extractSmtpFallback(msg)
+            if (fallback.isNotEmpty()) senderEmail = fallback
         }
 
         return EmailSummary(
@@ -1259,7 +1255,15 @@ object EwsXml {
         val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
             ?.firstChildElement(EWS_TYPES, "Mailbox")
         val fromName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
-        val fromEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
+        var fromEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
+        if ('@' !in fromEmail) {
+            val fallback = extractSmtpFallback(msg)
+            if (fallback.isNotEmpty()) fromEmail = fallback
+        }
+        val parentFolderId = msg.firstChildElement(EWS_TYPES, "ParentFolderId")
+            ?.getAttribute("Id")
+            ?.trim()
+            .orEmpty()
 
         val to = parseRecipients(msg.firstChildElement(EWS_TYPES, "ToRecipients"))
         val cc = parseRecipients(msg.firstChildElement(EWS_TYPES, "CcRecipients"))
@@ -1312,8 +1316,25 @@ object EwsXml {
             isFlagged = isFlagged,
             importance = importance,
             isDraft = isDraft,
-            attachments = attachments
+            attachments = attachments,
+            parentFolderId = parentFolderId
         )
+    }
+
+    private fun extractSmtpFallback(msg: Element): String {
+        val extProps = msg.getElementsByTagNameNS(EWS_TYPES, "ExtendedProperty")
+        for (j in 0 until extProps.length) {
+            val ep = extProps.item(j) as? Element ?: continue
+            val tag = ep.firstChildElement(EWS_TYPES, "ExtendedFieldURI")
+                ?.getAttribute("PropertyTag").orEmpty()
+            if (tag.equals("0x5d01", ignoreCase = true) ||
+                tag.equals("0x5d02", ignoreCase = true)
+            ) {
+                val candidate = ep.firstChildText(EWS_TYPES, "Value")
+                if ('@' in candidate) return candidate
+            }
+        }
+        return ""
     }
 
     fun parseGetAttachmentResponse(xml: String): DownloadedAttachment {
@@ -1567,6 +1588,13 @@ object EwsXml {
     }
 
     private fun Element.firstChildElement(ns: String, localName: String): Element? {
+        val children = childNodes
+        for (i in 0 until children.length) {
+            val node = children.item(i)
+            if (node is Element && node.namespaceURI == ns && node.localName == localName) {
+                return node
+            }
+        }
         val nodes = getElementsByTagNameNS(ns, localName)
         return if (nodes.length > 0) nodes.item(0) as? Element else null
     }

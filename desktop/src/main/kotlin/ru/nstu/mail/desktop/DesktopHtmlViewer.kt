@@ -64,8 +64,11 @@ import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 import ru.nstu.mail.data.EmailHtmlSanitizer
+import java.io.ByteArrayOutputStream
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+
+private const val MAX_REMOTE_IMAGE_BYTES = 4 * 1024 * 1024
 
 private val REMOTE_IMAGE_CLIENT: OkHttpClient by lazy {
     OkHttpClient.Builder()
@@ -324,7 +327,7 @@ private fun EmailImageView(src: String, alt: String, fgColor: Color) {
     var bitmap by remember(src) { mutableStateOf<ImageBitmap?>(decodeDataUriImage(src)) }
 
     LaunchedEffect(src) {
-        if (bitmap == null && (src.startsWith("https://", ignoreCase = true) || src.startsWith("http://", ignoreCase = true))) {
+        if (bitmap == null && src.startsWith("https://", ignoreCase = true)) {
             bitmap = loadRemoteImageBitmap(src)
         }
     }
@@ -368,8 +371,22 @@ private suspend fun loadRemoteImageBitmap(url: String): ImageBitmap? = withConte
         val req = Request.Builder().url(url).build()
         REMOTE_IMAGE_CLIENT.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return@withContext null
-            val bytes = resp.body?.bytes() ?: return@withContext null
-            if (bytes.isEmpty() || bytes.size > 4 * 1024 * 1024) return@withContext null
+            val body = resp.body ?: return@withContext null
+            if (body.contentLength() > MAX_REMOTE_IMAGE_BYTES) return@withContext null
+            val baos = ByteArrayOutputStream()
+            val buf = ByteArray(16 * 1024)
+            var total = 0
+            body.byteStream().use { input ->
+                while (true) {
+                    val read = input.read(buf)
+                    if (read == -1) break
+                    total += read
+                    if (total > MAX_REMOTE_IMAGE_BYTES) return@withContext null
+                    baos.write(buf, 0, read)
+                }
+            }
+            val bytes = baos.toByteArray()
+            if (bytes.isEmpty()) return@withContext null
             val img = Image.makeFromEncoded(bytes)
             // Skip 1x1 tracking pixels
             if (img.width <= 1 && img.height <= 1) return@withContext null
