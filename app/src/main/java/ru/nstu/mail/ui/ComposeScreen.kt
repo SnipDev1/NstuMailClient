@@ -83,6 +83,7 @@ import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.finalizeRecipientToken
 import ru.nstu.mail.data.formatMailDate
 import ru.nstu.mail.data.formatShortPersonName
 import ru.nstu.mail.data.formatSubjectWithTagHierarchies
@@ -90,6 +91,7 @@ import ru.nstu.mail.data.formatTagHierarchiesRaw
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.needsNameResolution
 import ru.nstu.mail.data.parseFormattedRecipient
+import ru.nstu.mail.data.parseRecipientTokens
 import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.resolveDisplayName
@@ -103,28 +105,6 @@ data class ComposeRecipient(
     val name: String,
     val email: String
 )
-
-fun parseRecipientTokens(raw: String): Pair<List<Pair<String, String>>, String> {
-    if (',' !in raw && ';' !in raw) {
-        return emptyList<Pair<String, String>>() to raw
-    }
-    val parts = raw.split(',', ';')
-    val completed = parts.dropLast(1).mapNotNull { seg ->
-        finalizeRecipientToken(seg)
-    }
-    return completed to parts.last().trimStart()
-}
-
-fun finalizeRecipientToken(raw: String): Pair<String, String>? {
-    val cleaned = raw.trim().trimEnd(',', ';').trim()
-    if (cleaned.isEmpty()) return null
-    val (name, email) = parseFormattedRecipient(cleaned)
-    return if ('@' in email) {
-        name.ifBlank { email } to email
-    } else {
-        null
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

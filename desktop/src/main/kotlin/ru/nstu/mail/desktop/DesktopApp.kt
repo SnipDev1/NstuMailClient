@@ -33,6 +33,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -114,6 +116,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.Key
@@ -131,6 +136,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -157,22 +164,24 @@ import ru.nstu.mail.data.avatarPaletteIndex
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractInitials
 import ru.nstu.mail.data.extractSubjectTagHierarchies
+import ru.nstu.mail.data.finalizeRecipientToken
 import ru.nstu.mail.data.formatMailDate
 import ru.nstu.mail.data.formatShortPersonName
 import ru.nstu.mail.data.formatSubjectWithTagHierarchies
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.needsNameResolution
 import ru.nstu.mail.data.parseFormattedRecipient
+import ru.nstu.mail.data.parseRecipientTokens
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.participants
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
 import ru.nstu.mail.data.shouldBatchMarkAsRead
-import ru.nstu.mail.data.splitEmails
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
 
 @Composable
@@ -907,6 +916,7 @@ private fun DesktopWorkspace(
                                 prefillTo = pane.prefillTo,
                                 prefillName = pane.prefillName,
                                 suggestions = state.directorySuggestions,
+                                avatars = avatars,
                                 profiles = profiles,
                                 knownNames = knownNames,
                                 tagTemplates = state.settings.tagTemplates,
@@ -914,6 +924,8 @@ private fun DesktopWorkspace(
                                 onCancel = controller::closeRightPane,
                                 onSearchDirectory = controller::searchDirectory,
                                 onClearSuggestions = controller::clearDirectorySuggestions,
+                                onRequestAvatar = controller::requestAvatar,
+                                onRequestPersonProfile = controller::requestPersonProfile,
                                 onAddTagTemplate = controller::addTagTemplate,
                                 onSubmit = controller::saveOrSendEmail
                             )
@@ -1625,22 +1637,6 @@ private fun DesktopPersonInfoDialog(
     )
 }
 
-internal fun appendRecipientEmail(currentText: String, email: String): String {
-    val cleanEmail = email.trim()
-    if (cleanEmail.isEmpty()) return currentText
-    val prefixPart = if (',' in currentText || ';' in currentText) {
-        val lastSep = maxOf(currentText.lastIndexOf(','), currentText.lastIndexOf(';'))
-        currentText.substring(0, lastSep)
-    } else {
-        ""
-    }
-    val existing = splitEmails(prefixPart).toMutableList()
-    if (existing.none { it.equals(cleanEmail, ignoreCase = true) }) {
-        existing += cleanEmail
-    }
-    return existing.joinToString(", ")
-}
-
 private fun htmlToPlainBody(html: String): String {
     val doc = Jsoup.parse(html)
     doc.outputSettings().prettyPrint(false)
@@ -1652,6 +1648,14 @@ private fun htmlToPlainBody(html: String): String {
         .trim()
 }
 
+private enum class ActiveDesktopRecipientField { TO, CC, BCC }
+
+private data class DesktopComposeRecipient(
+    val id: Long,
+    val name: String,
+    val email: String
+)
+
 @Composable
 private fun DesktopComposePane(
     currentUserEmail: String,
@@ -1662,6 +1666,7 @@ private fun DesktopComposePane(
     prefillTo: String? = null,
     prefillName: String? = null,
     suggestions: List<ContactEntry>,
+    avatars: Map<String, ImageBitmap?>,
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
     tagTemplates: List<String>,
@@ -1669,41 +1674,82 @@ private fun DesktopComposePane(
     onCancel: () -> Unit,
     onSearchDirectory: (String) -> Unit,
     onClearSuggestions: () -> Unit,
+    onRequestAvatar: (String) -> Unit,
+    onRequestPersonProfile: (name: String, email: String) -> Unit,
     onAddTagTemplate: (String) -> Unit,
     onSubmit: (String?, String?, String, String, String, String, String, List<File>, Boolean) -> Unit
 ) {
-    var toText by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) {
-        mutableStateOf(
+    val idSeq = remember { AtomicLong(1L) }
+
+    fun makeRecipient(name: String, email: String) =
+        DesktopComposeRecipient(id = idSeq.getAndIncrement(), name = name, email = email)
+
+    var toRecipients by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) {
+        mutableStateOf<List<DesktopComposeRecipient>>(
             when {
-                draft != null -> draft.to.map { parseFormattedRecipient(it).second.ifBlank { it } }.joinToString(", ")
-                !prefillTo.isNullOrBlank() -> prefillTo.trim()
-                replyTo != null && !isForward && replyAll ->
-                    (listOf(replyTo.fromEmail) + replyTo.to.map { parseFormattedRecipient(it).second })
-                        .filter { it.isNotBlank() && !it.equals(currentUserEmail, true) }
-                        .distinctBy { it.lowercase() }
-                        .joinToString(", ")
-                replyTo != null && !isForward -> replyTo.fromEmail
-                else -> ""
+                draft != null -> draft.to.mapNotNull { raw ->
+                    val (n, e) = parseFormattedRecipient(raw)
+                    if (e.isNotBlank()) makeRecipient(n, e) else null
+                }
+                !prefillTo.isNullOrBlank() -> {
+                    val clean = prefillTo.trim()
+                    listOf(makeRecipient(prefillName.orEmpty().ifBlank { clean }, clean))
+                }
+                replyTo != null && !isForward && replyAll -> {
+                    val rawPairs = buildList {
+                        if (replyTo.fromEmail.isNotBlank()) {
+                            add(replyTo.from to replyTo.fromEmail)
+                        }
+                        replyTo.to.forEach { add(parseFormattedRecipient(it)) }
+                    }
+                    rawPairs
+                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
+                        .distinctBy { it.second.lowercase() }
+                        .map { (n, e) -> makeRecipient(n, e) }
+                }
+                replyTo != null && !isForward && replyTo.fromEmail.isNotBlank() ->
+                    listOf(makeRecipient(replyTo.from, replyTo.fromEmail))
+                else -> emptyList()
             }
         )
     }
-    var ccText by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) {
-        mutableStateOf(
+    var ccRecipients by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) {
+        mutableStateOf<List<DesktopComposeRecipient>>(
             when {
-                draft != null -> draft.cc.map { parseFormattedRecipient(it).second.ifBlank { it } }.joinToString(", ")
+                draft != null -> draft.cc.mapNotNull { raw ->
+                    val (n, e) = parseFormattedRecipient(raw)
+                    if (e.isNotBlank()) makeRecipient(n, e) else null
+                }
                 replyTo != null && replyAll && !isForward ->
-                    replyTo.cc.map { parseFormattedRecipient(it).second }
-                        .filter { it.isNotBlank() && !it.equals(currentUserEmail, true) }
-                        .joinToString(", ")
-                else -> ""
+                    replyTo.cc
+                        .map { parseFormattedRecipient(it) }
+                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
+                        .distinctBy { it.second.lowercase() }
+                        .map { (n, e) -> makeRecipient(n, e) }
+                else -> emptyList()
             }
         )
     }
-    var bccText by remember(draft?.id, replyTo?.id, prefillTo) {
-        mutableStateOf(draft?.bcc.orEmpty().map { parseFormattedRecipient(it).second.ifBlank { it } }.joinToString(", "))
+    var bccRecipients by remember(draft?.id, replyTo?.id, prefillTo) {
+        mutableStateOf<List<DesktopComposeRecipient>>(
+            draft?.bcc.orEmpty().mapNotNull { raw ->
+                val (n, e) = parseFormattedRecipient(raw)
+                if (e.isNotBlank()) makeRecipient(n, e) else null
+            }
+        )
     }
-    var showCc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(ccText.isNotBlank()) }
-    var showBcc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(bccText.isNotBlank()) }
+    var showCc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(ccRecipients.isNotEmpty()) }
+    var showBcc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(bccRecipients.isNotEmpty()) }
+
+    var toInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf("") }
+    var ccInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf("") }
+    var bccInput by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf("") }
+
+    var activeField by remember { mutableStateOf(ActiveDesktopRecipientField.TO) }
+    var editingField by remember { mutableStateOf<ActiveDesktopRecipientField?>(null) }
+    var editingId by remember { mutableStateOf<Long?>(null) }
+    var editingText by remember { mutableStateOf("") }
+
     val initialSubj = remember(draft?.id, replyTo?.id, isForward, prefillTo) {
         when {
             draft != null -> if (draft.subject == "(Без темы)") {
@@ -1736,32 +1782,161 @@ private fun DesktopComposePane(
     var showAddTagDialog by remember { mutableStateOf(false) }
     val allHierarchies = (savedHierarchies + listOfNotNull(activePath.takeIf { it.isNotEmpty() })).distinctBy { formatTagPath(it).lowercase() }
 
-    fun appendRecipient(email: String) {
-        toText = appendRecipientEmail(toText, email)
+    fun listFor(field: ActiveDesktopRecipientField): List<DesktopComposeRecipient> = when (field) {
+        ActiveDesktopRecipientField.TO -> toRecipients
+        ActiveDesktopRecipientField.CC -> ccRecipients
+        ActiveDesktopRecipientField.BCC -> bccRecipients
+    }
+
+    fun updateList(field: ActiveDesktopRecipientField, next: List<DesktopComposeRecipient>) {
+        when (field) {
+            ActiveDesktopRecipientField.TO -> toRecipients = next
+            ActiveDesktopRecipientField.CC -> ccRecipients = next
+            ActiveDesktopRecipientField.BCC -> bccRecipients = next
+        }
+    }
+
+    fun inputFor(field: ActiveDesktopRecipientField): String = when (field) {
+        ActiveDesktopRecipientField.TO -> toInput
+        ActiveDesktopRecipientField.CC -> ccInput
+        ActiveDesktopRecipientField.BCC -> bccInput
+    }
+
+    fun setInput(field: ActiveDesktopRecipientField, value: String) {
+        when (field) {
+            ActiveDesktopRecipientField.TO -> toInput = value
+            ActiveDesktopRecipientField.CC -> ccInput = value
+            ActiveDesktopRecipientField.BCC -> bccInput = value
+        }
+    }
+
+    fun addUniqueRecipients(field: ActiveDesktopRecipientField, pairs: List<Pair<String, String>>) {
+        if (pairs.isEmpty()) return
+        val current = listFor(field).toMutableList()
+        for ((name, email) in pairs) {
+            if (current.none { it.email.equals(email, ignoreCase = true) }) {
+                current += makeRecipient(name, email)
+            }
+        }
+        updateList(field, current)
+    }
+
+    fun commitTrailingInput(field: ActiveDesktopRecipientField) {
+        val raw = inputFor(field)
+        val parsed = finalizeRecipientToken(raw)
+        if (parsed != null) {
+            addUniqueRecipients(field, listOf(parsed))
+            setInput(field, "")
+            onClearSuggestions()
+        }
+    }
+
+    fun commitInlineEdit() {
+        val f = editingField ?: return
+        val id = editingId ?: return
+        val current = listFor(f)
+        val existing = current.firstOrNull { it.id == id }
+        val trimmed = editingText.trim().trimEnd(',', ';').trim()
+        if (trimmed.isEmpty()) {
+            updateList(f, current.filterNot { it.id == id })
+        } else {
+            val parsed = finalizeRecipientToken(trimmed)
+            if (parsed != null && existing != null) {
+                val (newName, newEmail) = parsed
+                val finalName = if (newEmail.equals(existing.email, ignoreCase = true) &&
+                    existing.name.isNotBlank() && !existing.name.equals(existing.email, true)
+                ) {
+                    existing.name
+                } else {
+                    newName
+                }
+                updateList(
+                    f,
+                    current.map {
+                        if (it.id == id) it.copy(name = finalName, email = newEmail) else it
+                    }
+                )
+            }
+        }
+        editingField = null
+        editingId = null
+        editingText = ""
         onClearSuggestions()
     }
 
-    if (showSendConfirm) {
-        val subjFinal = formatSubjectWithTagHierarchies(subject, allHierarchies).ifBlank { "(Без темы)" }
-        val formattedTo = splitEmails(toText).joinToString(", ") { e ->
-            val name = resolveDisplayName("", e, profiles[e.lowercase()], knownNames)
-            if (name.isNotBlank() && !name.equals(e, true)) "$name <$e>" else e
+    fun collectAddressesForSubmit(field: ActiveDesktopRecipientField): String {
+        val emails = listFor(field).map { it.email }.toMutableList()
+        val trailing = inputFor(field).trim()
+        if (trailing.isNotEmpty()) {
+            val parsed = finalizeRecipientToken(trailing)
+            if (parsed != null) {
+                if (emails.none { it.equals(parsed.second, ignoreCase = true) }) {
+                    emails += parsed.second
+                }
+            } else {
+                emails += trailing
+            }
         }
+        return emails.joinToString(", ")
+    }
+
+    fun formatRecipientsPreview(field: ActiveDesktopRecipientField): String {
+        val formatted = listFor(field).map { rec ->
+            val key = rec.email.trim().lowercase()
+            val resolved = resolveDisplayName(rec.name, rec.email, profiles[key], knownNames)
+            if (resolved.isNotBlank() && !resolved.equals(rec.email, ignoreCase = true)) {
+                "$resolved <${rec.email}>"
+            } else {
+                rec.email
+            }
+        }.toMutableList()
+        val trailing = inputFor(field).trim()
+        if (trailing.isNotEmpty()) {
+            formatted += trailing
+        }
+        return formatted.joinToString(", ")
+    }
+
+    fun submitEmail(send: Boolean) {
+        commitInlineEdit()
+        val subjFinal = formatSubjectWithTagHierarchies(subject, allHierarchies)
+        onSubmit(
+            draft?.id,
+            draft?.changeKey,
+            collectAddressesForSubmit(ActiveDesktopRecipientField.TO),
+            collectAddressesForSubmit(ActiveDesktopRecipientField.CC),
+            collectAddressesForSubmit(ActiveDesktopRecipientField.BCC),
+            subjFinal,
+            body,
+            attachments,
+            send
+        )
+    }
+
+    if (showSendConfirm) {
+        val toPreview = formatRecipientsPreview(ActiveDesktopRecipientField.TO)
+        val ccPreview = formatRecipientsPreview(ActiveDesktopRecipientField.CC)
+        val bccPreview = formatRecipientsPreview(ActiveDesktopRecipientField.BCC)
+        val subjFinal = formatSubjectWithTagHierarchies(subject, allHierarchies).ifBlank { "(Без темы)" }
         AlertDialog(
             onDismissRequest = { showSendConfirm = false },
             title = { Text("Отправить письмо?") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Кому: $formattedTo", fontWeight = FontWeight.Medium)
-                    if (showCc && ccText.isNotBlank()) Text("Копия: $ccText", style = MaterialTheme.typography.bodySmall)
-                    if (showBcc && bccText.isNotBlank()) Text("Скрытая копия: $bccText", style = MaterialTheme.typography.bodySmall)
-                    Text("Тема: $subjFinal", style = MaterialTheme.typography.bodySmall)
+                    Text("Кому: $toPreview", fontWeight = FontWeight.Medium)
+                    if (ccPreview.isNotBlank()) {
+                        Text("Копия: $ccPreview", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (bccPreview.isNotBlank()) {
+                        Text("Скрытая копия: $bccPreview", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text("Тема: $subjFinal", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
                     showSendConfirm = false
-                    onSubmit(draft?.id, draft?.changeKey, toText, ccText, bccText, subjFinal, body, attachments, true)
+                    submitEmail(send = true)
                 }) { Text("Отправить") }
             },
             dismissButton = { TextButton(onClick = { showSendConfirm = false }) { Text("Отмена") } }
@@ -1800,7 +1975,13 @@ private fun DesktopComposePane(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = if (replyTo != null) "Ответ / Пересылка" else "Новое письмо",
+                text = when {
+                    draft != null && draft.id.isNotBlank() -> "Черновик"
+                    replyTo == null -> "Новое письмо"
+                    isForward -> "Переслать"
+                    replyAll -> "Ответить всем"
+                    else -> "Ответить"
+                },
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.align(Alignment.CenterVertically)
@@ -1814,23 +1995,23 @@ private fun DesktopComposePane(
                     if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
                         attachments = (attachments + chooser.selectedFiles.toList()).distinctBy { it.absolutePath }
                     }
-                }) {
+                }, enabled = !isSending) {
                     Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Файл")
                 }
-                OutlinedButton(onClick = {
-                    onSubmit(draft?.id, draft?.changeKey, toText, ccText, bccText, formatSubjectWithTagHierarchies(subject, allHierarchies), body, attachments, false)
-                }, enabled = !isSending) {
+                OutlinedButton(onClick = { submitEmail(send = false) }, enabled = !isSending) {
                     Icon(Icons.Default.Save, null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Черновик")
                 }
                 Button(onClick = {
-                    val toEmails = splitEmails(toText)
-                    val subjFinal = formatSubjectWithTagHierarchies(subject, allHierarchies)
-                    if (toEmails.isEmpty() || toEmails.any { '@' !in it }) {
-                        onSubmit(draft?.id, draft?.changeKey, toText, ccText, bccText, subjFinal, body, attachments, true)
+                    commitInlineEdit()
+                    commitTrailingInput(ActiveDesktopRecipientField.TO)
+                    commitTrailingInput(ActiveDesktopRecipientField.CC)
+                    commitTrailingInput(ActiveDesktopRecipientField.BCC)
+                    if (collectAddressesForSubmit(ActiveDesktopRecipientField.TO).isBlank()) {
+                        submitEmail(send = true)
                     } else {
                         showSendConfirm = true
                     }
@@ -1839,56 +2020,155 @@ private fun DesktopComposePane(
                     Spacer(Modifier.width(4.dp))
                     Text("Отправить")
                 }
-                TextButton(onClick = onCancel) { Text("Закрыть") }
+                TextButton(onClick = onCancel, enabled = !isSending) { Text("Закрыть") }
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = toText,
-                onValueChange = {
-                    toText = it
-                    val token = it.substringAfterLast(',').substringAfterLast(';').trim()
-                    onSearchDirectory(token)
-                },
-                label = { Text("Кому") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            if (!showCc) TextButton(onClick = { showCc = true }) { Text("+ Копия") }
-            if (!showBcc) TextButton(onClick = { showBcc = true }) { Text("+ СК") }
-        }
-        if (suggestions.isNotEmpty()) {
-            Card {
-                Column(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
-                    suggestions.forEach { s ->
-                        Row(modifier = Modifier.fillMaxWidth().clickable { appendRecipient(s.email) }.padding(8.dp)) {
-                            Text("${s.name} <${s.email}>", style = MaterialTheme.typography.bodySmall)
-                        }
+
+        @Composable
+        fun renderSection(
+            field: ActiveDesktopRecipientField,
+            role: ParticipantRole,
+            trailingHeaderActions: @Composable () -> Unit = {}
+        ) {
+            DesktopRecipientStripSection(
+                role = role,
+                recipients = listFor(field),
+                inputText = inputFor(field),
+                editingId = if (editingField == field) editingId else null,
+                editingText = editingText,
+                avatars = avatars,
+                profiles = profiles,
+                knownNames = knownNames,
+                enabled = !isSending,
+                suggestions = if (activeField == field) suggestions else emptyList(),
+                headerExtra = trailingHeaderActions,
+                onRequestAvatar = onRequestAvatar,
+                onRequestProfile = onRequestPersonProfile,
+                onInputChange = { newVal ->
+                    activeField = field
+                    val (completed, remainder) = parseRecipientTokens(newVal)
+                    if (completed.isNotEmpty()) {
+                        addUniqueRecipients(field, completed)
                     }
+                    setInput(field, remainder)
+                    onSearchDirectory(remainder)
+                },
+                onInputFocusChanged = { focused ->
+                    if (focused) {
+                        activeField = field
+                    } else {
+                        commitTrailingInput(field)
+                    }
+                },
+                onInputDone = { commitTrailingInput(field) },
+                onStartEdit = { rec ->
+                    commitInlineEdit()
+                    activeField = field
+                    editingField = field
+                    editingId = rec.id
+                    editingText = rec.email
+                },
+                onEditTextChange = { newText ->
+                    activeField = field
+                    if (',' in newText || ';' in newText) {
+                        editingText = newText.replace(",", "").replace(";", "").trim()
+                        commitInlineEdit()
+                    } else {
+                        editingText = newText
+                        onSearchDirectory(newText)
+                    }
+                },
+                onCommitEdit = { commitInlineEdit() },
+                onRemove = { rec ->
+                    updateList(field, listFor(field).filterNot { it.id == rec.id })
+                    if (editingField == field && editingId == rec.id) {
+                        editingField = null
+                        editingId = null
+                        editingText = ""
+                    }
+                },
+                onPickSuggestion = { entry ->
+                    val editTargetId = if (editingField == field) editingId else null
+                    if (editTargetId != null) {
+                        updateList(
+                            field,
+                            listFor(field).map {
+                                if (it.id == editTargetId) it.copy(name = entry.name, email = entry.email) else it
+                            }
+                        )
+                        editingField = null
+                        editingId = null
+                        editingText = ""
+                    } else {
+                        addUniqueRecipients(field, listOf(entry.name to entry.email))
+                        setInput(field, "")
+                    }
+                    onClearSuggestions()
+                }
+            )
+        }
+
+        renderSection(ActiveDesktopRecipientField.TO, ParticipantRole.TO) {
+            Row {
+                if (!showCc) TextButton(onClick = { showCc = true }) { Text("+ Копия") }
+                if (!showBcc) TextButton(onClick = { showBcc = true }) { Text("+ СК") }
+            }
+        }
+
+        if (showCc) {
+            HorizontalDivider()
+            renderSection(ActiveDesktopRecipientField.CC, ParticipantRole.CC) {
+                IconButton(
+                    onClick = {
+                        if (editingField == ActiveDesktopRecipientField.CC) {
+                            editingField = null
+                            editingId = null
+                            editingText = ""
+                        }
+                        if (activeField == ActiveDesktopRecipientField.CC) {
+                            activeField = ActiveDesktopRecipientField.TO
+                            onClearSuggestions()
+                        }
+                        ccRecipients = emptyList()
+                        ccInput = ""
+                        showCc = false
+                    },
+                    enabled = !isSending,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(Icons.Default.Close, "Убрать копию", modifier = Modifier.size(18.dp))
                 }
             }
         }
-        if (showCc) {
-            OutlinedTextField(
-                value = ccText,
-                onValueChange = { ccText = it },
-                label = { Text("Копия") },
-                singleLine = true,
-                trailingIcon = { IconButton(onClick = { ccText = ""; showCc = false }) { Icon(Icons.Default.Close, "Убрать") } },
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+
         if (showBcc) {
-            OutlinedTextField(
-                value = bccText,
-                onValueChange = { bccText = it },
-                label = { Text("Скрытая копия") },
-                singleLine = true,
-                trailingIcon = { IconButton(onClick = { bccText = ""; showBcc = false }) { Icon(Icons.Default.Close, "Убрать") } },
-                modifier = Modifier.fillMaxWidth()
-            )
+            HorizontalDivider()
+            renderSection(ActiveDesktopRecipientField.BCC, ParticipantRole.BCC) {
+                IconButton(
+                    onClick = {
+                        if (editingField == ActiveDesktopRecipientField.BCC) {
+                            editingField = null
+                            editingId = null
+                            editingText = ""
+                        }
+                        if (activeField == ActiveDesktopRecipientField.BCC) {
+                            activeField = ActiveDesktopRecipientField.TO
+                            onClearSuggestions()
+                        }
+                        bccRecipients = emptyList()
+                        bccInput = ""
+                        showBcc = false
+                    },
+                    enabled = !isSending,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(Icons.Default.Close, "Убрать скрытую копию", modifier = Modifier.size(18.dp))
+                }
+            }
         }
-        OutlinedTextField(value = subject, onValueChange = { subject = it }, label = { Text("Тема") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+
+        HorizontalDivider()
+        OutlinedTextField(value = subject, onValueChange = { subject = it }, label = { Text("Тема") }, singleLine = true, enabled = !isSending, modifier = Modifier.fillMaxWidth())
 
         if (savedHierarchies.isNotEmpty()) {
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1921,10 +2201,13 @@ private fun DesktopComposePane(
                 AssistChip(onClick = { showAddTagDialog = true }, label = { Text(if (activePath.isEmpty()) "+ Тег" else "+ Подтег") })
             }
         }
-        if (attachments.isNotEmpty()) {
+        if (attachments.isNotEmpty() || (draft?.attachments?.any { !it.isInline } == true)) {
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                draft?.attachments?.filterNot { it.isInline }?.forEach { existing ->
+                    InputChip(selected = false, onClick = {}, label = { Text(existing.name) })
+                }
                 attachments.forEach { f ->
-                    InputChip(selected = false, onClick = { attachments = attachments - f }, label = { Text(f.name) }, trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) })
+                    InputChip(selected = true, onClick = { attachments = attachments - f }, label = { Text(f.name) }, trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) })
                 }
             }
         }
@@ -1932,8 +2215,295 @@ private fun DesktopComposePane(
             value = body,
             onValueChange = { body = it },
             label = { Text("Текст письма") },
+            enabled = !isSending,
             minLines = 12,
             modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun DesktopRecipientStripSection(
+    role: ParticipantRole,
+    recipients: List<DesktopComposeRecipient>,
+    inputText: String,
+    editingId: Long?,
+    editingText: String,
+    avatars: Map<String, ImageBitmap?>,
+    profiles: Map<String, PersonProfile?>,
+    knownNames: Map<String, String>,
+    enabled: Boolean,
+    suggestions: List<ContactEntry>,
+    headerExtra: @Composable () -> Unit,
+    onRequestAvatar: (String) -> Unit,
+    onRequestProfile: (name: String, email: String) -> Unit,
+    onInputChange: (String) -> Unit,
+    onInputFocusChanged: (Boolean) -> Unit,
+    onInputDone: () -> Unit,
+    onStartEdit: (DesktopComposeRecipient) -> Unit,
+    onEditTextChange: (String) -> Unit,
+    onCommitEdit: () -> Unit,
+    onRemove: (DesktopComposeRecipient) -> Unit,
+    onPickSuggestion: (ContactEntry) -> Unit
+) {
+    val badgeBg = when (role) {
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.primaryContainer
+    }
+    val badgeText = when (role) {
+        ParticipantRole.TO -> MaterialTheme.colorScheme.onTertiaryContainer
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onPrimaryContainer
+    }
+    val rowState = rememberLazyListState()
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(color = badgeBg, shape = RoundedCornerShape(8.dp)) {
+                Text(
+                    text = role.labelRu,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = badgeText,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+            headerExtra()
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        LazyRow(
+            state = rowState,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(end = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items(recipients, key = { it.id }) { rec ->
+                if (editingId == rec.id) {
+                    val focusRequester = remember { FocusRequester() }
+                    var hadFocus by remember { mutableStateOf(false) }
+                    LaunchedEffect(rec.id) {
+                        runCatching { focusRequester.requestFocus() }
+                    }
+                    OutlinedTextField(
+                        value = editingText,
+                        onValueChange = onEditTextChange,
+                        singleLine = true,
+                        enabled = enabled,
+                        placeholder = { Text("Email…") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { onCommitEdit() }),
+                        modifier = Modifier
+                            .width(210.dp)
+                            .focusRequester(focusRequester)
+                            .onPreviewKeyEvent { ev ->
+                                if (ev.type == KeyEventType.KeyDown &&
+                                    (ev.key == Key.Enter || ev.key == Key.NumPadEnter)
+                                ) {
+                                    onCommitEdit()
+                                    true
+                                } else false
+                            }
+                            .onFocusChanged { fs ->
+                                if (fs.isFocused) {
+                                    hadFocus = true
+                                } else if (hadFocus) {
+                                    hadFocus = false
+                                    onCommitEdit()
+                                }
+                            }
+                    )
+                } else {
+                    val emailKey = rec.email.trim().lowercase()
+                    DesktopComposeRecipientTile(
+                        recipient = rec,
+                        role = role,
+                        photo = avatars[emailKey],
+                        profile = profiles[emailKey],
+                        knownNames = knownNames,
+                        enabled = enabled,
+                        onRequestAvatar = onRequestAvatar,
+                        onRequestProfile = { onRequestProfile(rec.name, rec.email) },
+                        onClick = { if (enabled) onStartEdit(rec) },
+                        onRemove = { if (enabled) onRemove(rec) }
+                    )
+                }
+            }
+
+            item(key = "input-${role.name}") {
+                var hadFocus by remember { mutableStateOf(false) }
+                OutlinedTextField(
+                    value = inputText,
+                    onValueChange = onInputChange,
+                    placeholder = { Text("Добавить email…") },
+                    singleLine = true,
+                    enabled = enabled,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Email,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(onDone = { onInputDone() }),
+                    modifier = Modifier
+                        .width(220.dp)
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type == KeyEventType.KeyDown &&
+                                (ev.key == Key.Enter || ev.key == Key.NumPadEnter)
+                            ) {
+                                onInputDone()
+                                true
+                            } else false
+                        }
+                        .onFocusChanged { fs ->
+                            if (fs.isFocused) {
+                                hadFocus = true
+                                onInputFocusChanged(true)
+                            } else if (hadFocus) {
+                                hadFocus = false
+                                onInputFocusChanged(false)
+                            }
+                        }
+                )
+            }
+        }
+
+        if (recipients.size > 3) {
+            Spacer(Modifier.height(2.dp))
+            HorizontalScrollbar(
+                adapter = rememberScrollbarAdapter(rowState),
+                modifier = Modifier.fillMaxWidth().height(8.dp)
+            )
+        }
+
+        if (suggestions.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    suggestions.forEachIndexed { idx, entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPickSuggestion(entry) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            DesktopAvatar(
+                                name = entry.name,
+                                email = entry.email,
+                                photo = avatars[entry.email.trim().lowercase()],
+                                size = 32.dp,
+                                onRequestAvatar = onRequestAvatar
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(entry.name, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    entry.email,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        if (idx < suggestions.lastIndex) HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopComposeRecipientTile(
+    recipient: DesktopComposeRecipient,
+    role: ParticipantRole,
+    photo: ImageBitmap?,
+    profile: PersonProfile?,
+    knownNames: Map<String, String>,
+    enabled: Boolean,
+    onRequestAvatar: (String) -> Unit,
+    onRequestProfile: () -> Unit,
+    onClick: () -> Unit,
+    onRemove: () -> Unit
+) {
+    val emailKey = recipient.email.trim().lowercase()
+    val cachedName = knownNames[emailKey]
+    LaunchedEffect(recipient.email, cachedName) {
+        if (needsNameResolution(recipient.name, recipient.email) &&
+            cachedName.isNullOrBlank() &&
+            profile == null
+        ) {
+            onRequestProfile()
+        }
+    }
+
+    val resolvedName = resolveDisplayName(recipient.name, recipient.email, profile, knownNames)
+    val nameColor = when (role) {
+        ParticipantRole.TO -> MaterialTheme.colorScheme.tertiary
+        ParticipantRole.CC -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+        ParticipantRole.BCC -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+        ParticipantRole.FROM -> MaterialTheme.colorScheme.onSurface
+    }
+
+    Column(
+        modifier = Modifier
+            .width(82.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(modifier = Modifier.size(48.dp)) {
+            DesktopAvatar(
+                name = resolvedName,
+                email = recipient.email,
+                photo = photo,
+                size = 42.dp,
+                onRequestAvatar = onRequestAvatar,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .then(
+                        if (role == ParticipantRole.TO) {
+                            Modifier.border(1.5.dp, MaterialTheme.colorScheme.tertiary, CircleShape)
+                        } else {
+                            Modifier
+                        }
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(enabled = enabled, onClick = onRemove),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Удалить",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = formatShortPersonName(resolvedName, recipient.email),
+            style = MaterialTheme.typography.labelSmall,
+            color = nameColor,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = if (role == ParticipantRole.TO) FontWeight.Medium else FontWeight.Normal
         )
     }
 }

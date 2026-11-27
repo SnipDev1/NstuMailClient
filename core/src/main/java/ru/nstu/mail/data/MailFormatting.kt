@@ -84,6 +84,28 @@ fun splitEmails(raw: String): List<String> =
         .map { it.trim() }
         .filter { it.isNotBlank() }
 
+fun parseRecipientTokens(raw: String): Pair<List<Pair<String, String>>, String> {
+    if (',' !in raw && ';' !in raw) {
+        return emptyList<Pair<String, String>>() to raw
+    }
+    val parts = raw.split(',', ';')
+    val completed = parts.dropLast(1).mapNotNull { seg ->
+        finalizeRecipientToken(seg)
+    }
+    return completed to parts.last().trimStart()
+}
+
+fun finalizeRecipientToken(raw: String): Pair<String, String>? {
+    val cleaned = raw.trim().trimEnd(',', ';').trim()
+    if (cleaned.isEmpty()) return null
+    val (name, email) = parseFormattedRecipient(cleaned)
+    return if ('@' in email) {
+        name.ifBlank { email } to email
+    } else {
+        null
+    }
+}
+
 fun sanitizeFilename(name: String): String {
     val cleaned = name
         .replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1F]"), "_")

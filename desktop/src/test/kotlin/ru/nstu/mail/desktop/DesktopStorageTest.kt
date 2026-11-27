@@ -11,6 +11,9 @@ import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.applyFolderUnreadDeltas
+import ru.nstu.mail.data.finalizeRecipientToken
+import ru.nstu.mail.data.formatShortPersonName
+import ru.nstu.mail.data.parseRecipientTokens
 import ru.nstu.mail.data.shouldBatchMarkAsRead
 import java.nio.file.Files
 
@@ -182,20 +185,14 @@ class DesktopStorageTest {
     }
 
     @Test
-    fun `appendRecipientEmail appends cleanly without overwriting prior comma-separated recipients`() {
-        assertEquals("ivan@nstu.ru", appendRecipientEmail("iv", "ivan@nstu.ru"))
-        assertEquals(
-            "a@nstu.ru, ivan@nstu.ru",
-            appendRecipientEmail("a@nstu.ru, iv", "ivan@nstu.ru")
-        )
-        assertEquals(
-            "a@nstu.ru, b@nstu.ru",
-            appendRecipientEmail("a@nstu.ru; b@nstu.ru; B", "b@nstu.ru")
-        )
-        assertEquals(
-            "a@nstu.ru, b@nstu.ru",
-            appendRecipientEmail("a@nstu.ru, ", "b@nstu.ru")
-        )
+    fun `recipient token parsing and short person name formatting match compose strip`() {
+        val (done, rem) = parseRecipientTokens("a@nstu.ru, Иванов И.И. <ivanov@corp.nstu.ru>; Петров")
+        assertEquals(listOf("a@nstu.ru" to "a@nstu.ru", "Иванов И.И." to "ivanov@corp.nstu.ru"), done)
+        assertEquals("Петров", rem)
+        assertEquals("ivanov@corp.nstu.ru" to "ivanov@corp.nstu.ru", finalizeRecipientToken(" ivanov@corp.nstu.ru "))
+        assertEquals("Иванов И.И.", formatShortPersonName("Иванов Иван Иванович", "ivanov@corp.nstu.ru"))
+        assertEquals("Петров П.", formatShortPersonName("Петров Пётр", "petrov@corp.nstu.ru"))
+        assertEquals("user", formatShortPersonName("", "user@stud.nstu.ru"))
     }
 
     @Test

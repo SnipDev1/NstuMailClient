@@ -46,16 +46,16 @@ import ru.nstu.mail.data.shouldNotifyForMessage
 import ru.nstu.mail.data.shouldRouteToUnsorted
 import ru.nstu.mail.data.sortTagTemplatesHierarchically
 import ru.nstu.mail.data.extractInitials
+import ru.nstu.mail.data.finalizeRecipientToken
 import ru.nstu.mail.data.formatShortPersonName
 import ru.nstu.mail.data.needsNameResolution
+import ru.nstu.mail.data.parseRecipientTokens
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.notify.isMessageSeen
 import ru.nstu.mail.notify.mergeSeenMessageIds
 import ru.nstu.mail.notify.messageSeenKeys
 import ru.nstu.mail.notify.selectNewMessagesToNotify
 import ru.nstu.mail.notify.shouldProcessMonitoredMessage
-import ru.nstu.mail.ui.finalizeRecipientToken
-import ru.nstu.mail.ui.parseRecipientTokens
 import java.util.Base64
 
 class EwsXmlTest {
