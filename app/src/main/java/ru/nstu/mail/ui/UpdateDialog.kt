@@ -51,7 +51,7 @@ fun UpdateDialog(
                 if (update.apkSizeBytes > 0L) {
                     val mb = update.apkSizeBytes / (1024.0 * 1024.0)
                     Text(
-                        text = String.format("Размер APK: %.1f МБ", mb),
+                        text = String.format(java.util.Locale.getDefault(), "Размер APK: %.1f МБ", mb),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

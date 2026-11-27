@@ -45,6 +45,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -71,6 +72,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -109,6 +111,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -118,6 +121,12 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isMetaPressed
+import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -158,10 +167,12 @@ import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.participants
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
+import ru.nstu.mail.data.shouldBatchMarkAsRead
 import ru.nstu.mail.data.splitEmails
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
+import java.time.Instant
 import javax.swing.JFileChooser
 
 @Composable
@@ -235,7 +246,7 @@ private fun DesktopLoginPane(
 ) {
     var email by remember(state.credentials?.email) { mutableStateOf(state.credentials?.email.orEmpty()) }
     var password by remember(state.credentials?.password) { mutableStateOf(state.credentials?.password.orEmpty()) }
-    var serverUrl by remember { mutableStateOf(state.credentials?.serverUrl ?: DEFAULT_SERVER_URL) }
+    var serverUrl by remember(state.credentials?.serverUrl) { mutableStateOf(state.credentials?.serverUrl ?: DEFAULT_SERVER_URL) }
     var showPassword by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
@@ -320,6 +331,8 @@ private fun DesktopWorkspace(
     var deleteFolderTarget by remember { mutableStateOf<MailFolder?>(null) }
     var confirmEmptyFolder by remember { mutableStateOf(false) }
     var moveMessageTarget by remember { mutableStateOf<EmailDetail?>(null) }
+    var showBatchMovePicker by remember { mutableStateOf(false) }
+    var confirmBatchDelete by remember { mutableStateOf(false) }
     var selectedPerson by remember { mutableStateOf<EmailParticipant?>(null) }
     var topFolderMenuOpen by remember { mutableStateOf(false) }
     var searchDraft by remember(state.searchQuery) { mutableStateOf(state.searchQuery) }
@@ -388,28 +401,62 @@ private fun DesktopWorkspace(
     }
 
     moveMessageTarget?.let { msg ->
+        DesktopFolderPickerDialog(
+            folders = state.folders,
+            excludeFolderId = msg.parentFolderId.ifBlank { state.currentFolder?.id },
+            onDismiss = { moveMessageTarget = null },
+            onSelect = { f ->
+                moveMessageTarget = null
+                controller.moveDetail(msg, f)
+            }
+        )
+    }
+
+    if (showBatchMovePicker && state.selectedIds.isNotEmpty()) {
+        val uniqueParentId = state.messages
+            .filter { it.id in state.selectedIds }
+            .map { it.parentFolderId.ifBlank { state.currentFolder?.id.orEmpty() } }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .singleOrNull()
+        DesktopFolderPickerDialog(
+            folders = state.folders,
+            excludeFolderId = uniqueParentId,
+            onDismiss = { showBatchMovePicker = false },
+            onSelect = { f ->
+                showBatchMovePicker = false
+                controller.batchMove(f)
+            }
+        )
+    }
+
+    if (confirmBatchDelete && state.selectedIds.isNotEmpty()) {
+        val deletedId = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }?.id
+        val inDeletedFolder = state.currentFolder?.systemKind == SystemFolderKind.DELETED
+        val allInDeleted = state.messages
+            .filter { it.id in state.selectedIds }
+            .all { inDeletedFolder || (deletedId != null && it.parentFolderId == deletedId) }
         AlertDialog(
-            onDismissRequest = { moveMessageTarget = null },
-            title = { Text("Переместить в папку") },
+            onDismissRequest = { confirmBatchDelete = false },
+            title = { Text("Удалить выбранные письма (${state.selectedIds.size})?") },
             text = {
-                Column(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                    state.folders.filter { it.id != state.currentFolder?.id }.forEach { f ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                moveMessageTarget = null
-                                controller.moveDetail(msg, f)
-                            }.padding(start = (6 + minOf(f.depth, 4) * 12).dp, top = 8.dp, bottom = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(folderIcon(f), null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(f.displayName)
-                        }
+                Text(
+                    if (allInDeleted) {
+                        "Выбранные письма будут удалены безвозвратно."
+                    } else {
+                        "Выбранные письма будут перемещены в папку «Удалённые»."
                     }
-                }
+                )
             },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { moveMessageTarget = null }) { Text("Отмена") } }
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmBatchDelete = false
+                    controller.batchDelete()
+                }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBatchDelete = false }) { Text("Отмена") }
+            }
         )
     }
 
@@ -604,42 +651,79 @@ private fun DesktopWorkspace(
             // --- 2. Middle Mail List ---
             if (!showRightOnlyInCompact) {
                 Column(modifier = if (compactMode) Modifier.weight(1f).fillMaxHeight() else Modifier.width(mailListWidth).fillMaxHeight()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                            if (compactMode) {
-                                IconButton(onClick = { sidebarVisibleCompact = !sidebarVisibleCompact }, modifier = Modifier.size(32.dp)) {
-                                    Icon(Icons.Default.Menu, "Папки")
+                    if (state.selectedIds.isNotEmpty()) {
+                        val markAsRead = shouldBatchMarkAsRead(state.messages, state.selectedIds)
+                        Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(onClick = controller::clearSelection) {
+                                    Icon(Icons.Default.Close, "Снять выделение")
                                 }
-                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "Выбрано: ${state.selectedIds.size}",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = controller::toggleSelectAllVisible) {
+                                    Icon(Icons.Default.SelectAll, "Выбрать все")
+                                }
+                                IconButton(onClick = { controller.batchSetRead(markAsRead) }) {
+                                    Icon(
+                                        imageVector = if (markAsRead) Icons.Default.MarkEmailRead else Icons.Default.MarkEmailUnread,
+                                        contentDescription = if (markAsRead) "Прочитано" else "Непрочитано"
+                                    )
+                                }
+                                IconButton(onClick = { showBatchMovePicker = true }) {
+                                    Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Переместить")
+                                }
+                                IconButton(onClick = { confirmBatchDelete = true }) {
+                                    Icon(Icons.Default.Delete, "Удалить")
+                                }
                             }
-                            Text(state.currentFolder?.displayName ?: "Почта", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Row {
-                            IconButton(onClick = { controller.refresh() }) { Icon(Icons.Default.Refresh, "Обновить") }
-                            Box {
-                                IconButton(onClick = { topFolderMenuOpen = true }) { Icon(Icons.Default.MoreVert, "Меню папки") }
-                                DropdownMenu(expanded = topFolderMenuOpen, onDismissRequest = { topFolderMenuOpen = false }) {
-                                    state.currentFolder?.let { cur ->
-                                        DropdownMenuItem(
-                                            text = { Text(if (isMuted(cur)) "Уведомления: выкл (вкл.)" else "Уведомления: вкл (выкл.)") },
-                                            onClick = { topFolderMenuOpen = false; controller.toggleFolderNotifications(cur) }
-                                        )
-                                        if (!cur.isSystem && !cur.displayName.equals(UNSORTED_FOLDER_NAME, true)) {
-                                            DropdownMenuItem(
-                                                text = { Text("Автосортировка по дереву папки") },
-                                                onClick = { topFolderMenuOpen = false; controller.enableAutoSortForFolderTree(cur) }
-                                            )
-                                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                if (compactMode) {
+                                    IconButton(onClick = { sidebarVisibleCompact = !sidebarVisibleCompact }, modifier = Modifier.size(32.dp)) {
+                                        Icon(Icons.Default.Menu, "Папки")
                                     }
-                                    DropdownMenuItem(text = { Text("Отметить все прочитанными") }, onClick = { topFolderMenuOpen = false; controller.markAllReadInCurrentFolder() })
-                                    DropdownMenuItem(text = { Text("Создать подпапку") }, onClick = { topFolderMenuOpen = false; createFolderParent = true to state.currentFolder })
-                                    val canEmpty = state.currentFolder?.systemKind == SystemFolderKind.DELETED || state.currentFolder?.systemKind == SystemFolderKind.JUNK
-                                    if (canEmpty) {
-                                        DropdownMenuItem(text = { Text("Очистить папку") }, onClick = { topFolderMenuOpen = false; confirmEmptyFolder = true })
+                                    Spacer(Modifier.width(4.dp))
+                                }
+                                Text(state.currentFolder?.displayName ?: "Почта", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Row {
+                                IconButton(onClick = { controller.refresh() }) { Icon(Icons.Default.Refresh, "Обновить") }
+                                Box {
+                                    IconButton(onClick = { topFolderMenuOpen = true }) { Icon(Icons.Default.MoreVert, "Меню папки") }
+                                    DropdownMenu(expanded = topFolderMenuOpen, onDismissRequest = { topFolderMenuOpen = false }) {
+                                        state.currentFolder?.let { cur ->
+                                            DropdownMenuItem(
+                                                text = { Text(if (isMuted(cur)) "Уведомления: выкл (вкл.)" else "Уведомления: вкл (выкл.)") },
+                                                onClick = { topFolderMenuOpen = false; controller.toggleFolderNotifications(cur) }
+                                            )
+                                            if (!cur.isSystem && !cur.displayName.equals(UNSORTED_FOLDER_NAME, true)) {
+                                                DropdownMenuItem(
+                                                    text = { Text("Автосортировка по дереву папки") },
+                                                    onClick = { topFolderMenuOpen = false; controller.enableAutoSortForFolderTree(cur) }
+                                                )
+                                            }
+                                        }
+                                        DropdownMenuItem(text = { Text("Отметить все прочитанными") }, onClick = { topFolderMenuOpen = false; controller.markAllReadInCurrentFolder() })
+                                        DropdownMenuItem(text = { Text("Создать подпапку") }, onClick = { topFolderMenuOpen = false; createFolderParent = true to state.currentFolder })
+                                        val canEmpty = state.currentFolder?.systemKind == SystemFolderKind.DELETED || state.currentFolder?.systemKind == SystemFolderKind.JUNK
+                                        if (canEmpty) {
+                                            DropdownMenuItem(text = { Text("Очистить папку") }, onClick = { topFolderMenuOpen = false; confirmEmptyFolder = true })
+                                        }
                                     }
                                 }
                             }
@@ -733,12 +817,14 @@ private fun DesktopWorkspace(
                                     item = item,
                                     displaySender = displayName,
                                     photo = avatars[skey],
-                                    selected = isOpen,
+                                    isOpen = isOpen,
+                                    isChecked = item.id in state.selectedIds,
                                     onRequestAvatar = controller::requestAvatar,
                                     onAvatarClick = {
                                         selectedPerson = EmailParticipant(displayName, item.senderEmail, ParticipantRole.FROM)
                                     },
                                     onClick = { controller.openMessage(item) },
+                                    onToggleSelect = { controller.toggleSelection(item.id) },
                                     onToggleFlag = { controller.toggleFlagSummary(item) }
                                 )
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -775,9 +861,16 @@ private fun DesktopWorkspace(
                                     DesktopThemeMode.LIGHT -> false
                                     DesktopThemeMode.DARK -> true
                                 }
+                                val junkId = state.folders.firstOrNull { it.systemKind == SystemFolderKind.JUNK }?.id
+                                val deletedId = state.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }?.id
+                                val detailInJunk = state.currentFolder?.systemKind == SystemFolderKind.JUNK ||
+                                    (junkId != null && detail.parentFolderId == junkId)
+                                val detailInDeleted = state.currentFolder?.systemKind == SystemFolderKind.DELETED ||
+                                    (deletedId != null && detail.parentFolderId == deletedId)
                                 DesktopMessageDetailPane(
                                     detail = detail,
-                                    currentFolder = state.currentFolder,
+                                    isInJunk = detailInJunk,
+                                    isInDeleted = detailInDeleted,
                                     avatars = avatars,
                                     profiles = profiles,
                                     knownNames = knownNames,
@@ -953,63 +1046,167 @@ private fun SidebarFolderRow(
 }
 
 @Composable
+private fun DesktopFolderPickerDialog(
+    folders: List<MailFolder>,
+    excludeFolderId: String?,
+    onDismiss: () -> Unit,
+    onSelect: (MailFolder) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Переместить в папку") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                folders.filter { it.id != excludeFolderId }.forEach { f ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            onSelect(f)
+                        }.padding(start = (6 + minOf(f.depth, 4) * 12).dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(folderIcon(f), null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(f.displayName)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
+    )
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
 private fun DesktopEmailListItem(
     item: EmailSummary,
     displaySender: String,
     photo: ImageBitmap?,
-    selected: Boolean,
+    isOpen: Boolean,
+    isChecked: Boolean,
     onRequestAvatar: (String) -> Unit,
     onAvatarClick: () -> Unit,
     onClick: () -> Unit,
+    onToggleSelect: () -> Unit,
     onToggleFlag: () -> Unit
 ) {
+    var isHovered by remember { mutableStateOf(false) }
+    val showCheckbox = isHovered || isChecked
     val weight = if (item.isRead) FontWeight.Normal else FontWeight.Bold
-    val bg = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surface
-    Row(
-        modifier = Modifier.fillMaxWidth().background(bg).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.Top
+    val bg = when {
+        isChecked -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+        isOpen -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.50f)
+        isHovered -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        else -> MaterialTheme.colorScheme.surface
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .onPointerEvent(PointerEventType.Enter) { isHovered = true }
+            .onPointerEvent(PointerEventType.Exit) { isHovered = false }
     ) {
-        Box(
+        Row(
             modifier = Modifier
-                .clip(CircleShape)
-                .clickable(onClick = onAvatarClick)
+                .fillMaxWidth()
+                .onPointerEvent(PointerEventType.Press, pass = PointerEventPass.Initial) { ev ->
+                    if (ev.buttons.isPrimaryPressed &&
+                        (ev.keyboardModifiers.isCtrlPressed || ev.keyboardModifiers.isMetaPressed)
+                    ) {
+                        ev.changes.forEach { it.consume() }
+                        onToggleSelect()
+                    }
+                }
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top
         ) {
-            DesktopAvatar(displaySender, item.senderEmail, photo, 36.dp, onRequestAvatar)
-        }
-        Spacer(Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                if (!item.isRead) {
-                    Box(modifier = Modifier.padding(end = 6.dp).size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
-                }
-                Text(displaySender, style = MaterialTheme.typography.titleSmall, fontWeight = weight, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                if (item.hasAttachments) {
-                    Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(14.dp).padding(end = 2.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Text(formatMailDate(item.receivedAt), style = MaterialTheme.typography.labelSmall, color = if (item.isRead) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .clickable(onClick = onAvatarClick)
+            ) {
+                DesktopAvatar(displaySender, item.senderEmail, photo, 36.dp, onRequestAvatar)
             }
-            val (hierarchies, cleanSubject) = remember(item.subject) { extractSubjectTagHierarchies(item.subject) }
-            if (hierarchies.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 2.dp, bottom = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(end = if (showCheckbox) 26.dp else 0.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    hierarchies.forEach { h ->
-                        Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(6.dp)) {
-                            Text(h.joinToString(" › "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp))
+                    if (!item.isRead) {
+                        Box(modifier = Modifier.padding(end = 6.dp).size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+                    }
+                    Text(displaySender, style = MaterialTheme.typography.titleSmall, fontWeight = weight, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    if (item.hasAttachments) {
+                        Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(14.dp).padding(end = 2.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(formatMailDate(item.receivedAt), style = MaterialTheme.typography.labelSmall, color = if (item.isRead) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
+                }
+                val (hierarchies, cleanSubject) = remember(item.subject) { extractSubjectTagHierarchies(item.subject) }
+                if (hierarchies.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 2.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        hierarchies.forEach { h ->
+                            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(6.dp)) {
+                                Text(h.joinToString(" › "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp))
+                            }
                         }
                     }
                 }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(cleanSubject.ifBlank { item.subject }, style = MaterialTheme.typography.bodyMedium, fontWeight = weight, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (item.preview.isNotBlank()) {
-                        Text(item.preview, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(cleanSubject.ifBlank { item.subject }, style = MaterialTheme.typography.bodyMedium, fontWeight = weight, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (item.preview.isNotBlank()) {
+                            Text(item.preview, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    IconButton(onClick = onToggleFlag, modifier = Modifier.size(28.dp)) {
+                        Icon(if (item.isFlagged) Icons.Default.Star else Icons.Default.StarBorder, null, tint = if (item.isFlagged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
                     }
                 }
-                IconButton(onClick = onToggleFlag, modifier = Modifier.size(28.dp)) {
-                    Icon(if (item.isFlagged) Icons.Default.Star else Icons.Default.StarBorder, null, tint = if (item.isFlagged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+            }
+        }
+        if (showCheckbox) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 6.dp, end = 6.dp)
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onToggleSelect),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(
+                            if (isChecked) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+                        )
+                        .then(
+                            if (isChecked) Modifier
+                            else Modifier.border(
+                                1.5.dp,
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                RoundedCornerShape(4.dp)
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isChecked) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Выбрано",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1020,7 +1217,8 @@ private fun DesktopEmailListItem(
 @Composable
 private fun DesktopMessageDetailPane(
     detail: EmailDetail,
-    currentFolder: MailFolder?,
+    isInJunk: Boolean,
+    isInDeleted: Boolean,
     avatars: Map<String, ImageBitmap?>,
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
@@ -1049,6 +1247,15 @@ private fun DesktopMessageDetailPane(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Удалить письмо?") },
+            text = {
+                Text(
+                    if (isInDeleted) {
+                        "Письмо будет удалено безвозвратно."
+                    } else {
+                        "Письмо будет перемещено в папку «Удалённые»."
+                    }
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
             },
@@ -1082,7 +1289,7 @@ private fun DesktopMessageDetailPane(
                 IconButton(onClick = onToggleRead, modifier = Modifier.size(36.dp)) { Icon(if (detail.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead, "Статус прочтения", modifier = Modifier.size(20.dp)) }
                 IconButton(onClick = onToggleFlag, modifier = Modifier.size(36.dp)) { Icon(if (detail.isFlagged) Icons.Default.Star else Icons.Default.StarBorder, "Флажок", modifier = Modifier.size(20.dp)) }
                 IconButton(onClick = onMove, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Переместить", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onToggleSpam, modifier = Modifier.size(36.dp)) { Icon(if (currentFolder?.systemKind == SystemFolderKind.JUNK) Icons.Default.Inbox else Icons.Default.Report, "Спам", modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = onToggleSpam, modifier = Modifier.size(36.dp)) { Icon(if (isInJunk) Icons.Default.Inbox else Icons.Default.Report, "Спам", modifier = Modifier.size(20.dp)) }
                 if (darkTheme) {
                     IconButton(onClick = { forceLight = !forceLight }, modifier = Modifier.size(36.dp)) { Icon(if (forceLight) Icons.Default.DarkMode else Icons.Default.LightMode, "Фон письма", modifier = Modifier.size(20.dp)) }
                 }
@@ -1521,7 +1728,7 @@ private fun DesktopComposePane(
             }
         )
     }
-    var attachments by remember { mutableStateOf<List<File>>(emptyList()) }
+    var attachments by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf<List<File>>(emptyList()) }
     var showSendConfirm by remember { mutableStateOf(false) }
     var showAddTagDialog by remember { mutableStateOf(false) }
     val allHierarchies = (savedHierarchies + listOfNotNull(activePath.takeIf { it.isNotEmpty() })).distinctBy { formatTagPath(it).lowercase() }
@@ -1798,6 +2005,9 @@ private fun DesktopCalendarPane(
         var location by remember { mutableStateOf("") }
         var start by remember { mutableStateOf(java.time.LocalDate.now().plusDays(1).toString() + "T09:00:00Z") }
         var end by remember { mutableStateOf(java.time.LocalDate.now().plusDays(1).toString() + "T10:00:00Z") }
+        val startInst = remember(start) { runCatching { Instant.parse(start.trim()) }.getOrNull() }
+        val endInst = remember(end) { runCatching { Instant.parse(end.trim()) }.getOrNull() }
+        val timeValid = startInst != null && endInst != null && endInst.isAfter(startInst)
         AlertDialog(
             onDismissRequest = { showCreate = false },
             title = { Text("Новое событие") },
@@ -1807,9 +2017,21 @@ private fun DesktopCalendarPane(
                     OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("Место") }, singleLine = true)
                     OutlinedTextField(value = start, onValueChange = { start = it }, label = { Text("Начало ISO") }, singleLine = true)
                     OutlinedTextField(value = end, onValueChange = { end = it }, label = { Text("Конец ISO") }, singleLine = true)
+                    if (!timeValid) {
+                        Text(
+                            "Время окончания должно быть позже начала (ISO-8601)",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
             },
-            confirmButton = { TextButton(onClick = { showCreate = false; onCreateEvent(subject, start, end, location, "") }, enabled = subject.isNotBlank()) { Text("Создать") } },
+            confirmButton = {
+                TextButton(
+                    onClick = { showCreate = false; onCreateEvent(subject, start.trim(), end.trim(), location, "") },
+                    enabled = subject.isNotBlank() && timeValid
+                ) { Text("Создать") }
+            },
             dismissButton = { TextButton(onClick = { showCreate = false }) { Text("Отмена") } }
         )
     }

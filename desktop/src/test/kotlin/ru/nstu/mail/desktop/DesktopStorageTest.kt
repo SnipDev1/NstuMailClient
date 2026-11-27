@@ -6,7 +6,12 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.nstu.mail.data.Credentials
+import ru.nstu.mail.data.EmailSummary
+import ru.nstu.mail.data.MailFolder
+import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
+import ru.nstu.mail.data.applyFolderUnreadDeltas
+import ru.nstu.mail.data.shouldBatchMarkAsRead
 import java.nio.file.Files
 
 class DesktopStorageTest {
@@ -191,5 +196,35 @@ class DesktopStorageTest {
             "a@nstu.ru, b@nstu.ru",
             appendRecipientEmail("a@nstu.ru, ", "b@nstu.ru")
         )
+    }
+
+    @Test
+    fun `applyFolderUnreadDeltas updates affected folders, propagates to parent, and clamps at zero`() {
+        val folders = listOf(
+            MailFolder(id = "inbox", changeKey = "1", parentId = "", displayName = "Входящие", totalCount = 10, unreadCount = 2, systemKind = SystemFolderKind.INBOX),
+            MailFolder(id = "parent", changeKey = "2", parentId = "", displayName = "Родитель", totalCount = 6, unreadCount = 4),
+            MailFolder(id = "sub", changeKey = "3", parentId = "parent", displayName = "Подпапка", totalCount = 4, unreadCount = 3),
+            MailFolder(id = "other", changeKey = "4", parentId = "", displayName = "Другая", totalCount = 5, unreadCount = 1)
+        )
+        val updated = applyFolderUnreadDeltas(
+            folders,
+            mapOf("inbox" to -5, "sub" to 2, "other" to 0, "missing" to -1)
+        )
+        assertEquals(0, updated[0].unreadCount)
+        assertEquals(6, updated[1].unreadCount)
+        assertEquals(5, updated[2].unreadCount)
+        assertEquals(1, updated[3].unreadCount)
+    }
+
+    @Test
+    fun `shouldBatchMarkAsRead returns true only when at least one selected item is unread`() {
+        val items = listOf(
+            EmailSummary("1", "ck1", "s1", "a", "a@nstu.ru", "2026-01-01T00:00:00Z", isRead = false, hasAttachments = false, preview = ""),
+            EmailSummary("2", "ck2", "s2", "b", "b@nstu.ru", "2026-01-01T00:00:00Z", isRead = true, hasAttachments = false, preview = "")
+        )
+        assertFalse(shouldBatchMarkAsRead(items, emptySet()))
+        assertTrue(shouldBatchMarkAsRead(items, setOf("1", "2")))
+        assertTrue(shouldBatchMarkAsRead(items, setOf("1")))
+        assertFalse(shouldBatchMarkAsRead(items, setOf("2")))
     }
 }

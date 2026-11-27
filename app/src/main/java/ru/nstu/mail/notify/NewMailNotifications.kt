@@ -219,51 +219,40 @@ object MailNotificationHelper {
         Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
 
     fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = context.getSystemService(NotificationManager::class.java) ?: return
-            if (nm.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
-                val channel = NotificationChannel(
-                    NOTIFICATION_CHANNEL_ID,
-                    "Новые письма",
-                    NotificationManager.IMPORTANCE_DEFAULT
-                ).apply {
-                    description = "Уведомления о входящих письмах Почты НГТУ"
-                }
-                nm.createNotificationChannel(channel)
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "Новые письма",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Уведомления о входящих письмах Почты НГТУ"
             }
+            nm.createNotificationChannel(channel)
         }
     }
 
     fun ensurePushServiceChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = context.getSystemService(NotificationManager::class.java) ?: return
-            if (nm.getNotificationChannel(PUSH_SERVICE_CHANNEL_ID) == null) {
-                val channel = NotificationChannel(
-                    PUSH_SERVICE_CHANNEL_ID,
-                    "Фоновая служба почты",
-                    NotificationManager.IMPORTANCE_MIN
-                ).apply {
-                    setShowBadge(false)
-                    description = "Постоянное соединение для мгновенных уведомлений. " +
-                        "Этот канал можно скрыть без отключения уведомлений о письмах."
-                }
-                nm.createNotificationChannel(channel)
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(PUSH_SERVICE_CHANNEL_ID) == null) {
+            val channel = NotificationChannel(
+                PUSH_SERVICE_CHANNEL_ID,
+                "Фоновая служба почты",
+                NotificationManager.IMPORTANCE_MIN
+            ).apply {
+                setShowBadge(false)
+                description = "Постоянное соединение для мгновенных уведомлений. " +
+                    "Этот канал можно скрыть без отключения уведомлений о письмах."
             }
+            nm.createNotificationChannel(channel)
         }
     }
 
-    fun channelSettingsIntent(context: Context, channelId: String): Intent {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
-            }
-        } else {
-            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-            }
+    fun channelSettingsIntent(context: Context, channelId: String): Intent =
+        Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
         }
-    }
 
     fun buildPushServiceNotification(context: Context): Notification {
         ensurePushServiceChannel(context)

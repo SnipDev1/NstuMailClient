@@ -37,6 +37,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.applyFolderUnreadDeltas
 import ru.nstu.mail.data.buildAutoSortFromFolderTree
 import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
@@ -93,6 +94,7 @@ data class DesktopUiState(
     val searchQuery: String = "",
     val searchAllFolders: Boolean = false,
     val messages: List<EmailSummary> = emptyList(),
+    val selectedIds: Set<String> = emptySet(),
     val reachedEnd: Boolean = true,
     val selectedMessage: EmailDetail? = null,
     val rightPane: DesktopRightPane = DesktopRightPane.Empty,
@@ -102,6 +104,13 @@ data class DesktopUiState(
     val settings: DesktopSettings = DesktopSettings(),
     val availableUpdate: DesktopUpdateInfo? = null,
     val isCheckingUpdate: Boolean = false
+)
+
+private data class SeenSnapshot(
+    val initialized: Boolean,
+    val seenKeys: Set<String>,
+    val baselinedFolders: Set<String>,
+    val lastSyncMs: Long
 )
 
 class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDir()) {
@@ -153,6 +162,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     fun dispose() {
         pushJob?.cancel()
+        loadMessagesJob?.cancel()
         directoryJob?.cancel()
         updateCheckJob?.cancel()
         scope.cancel()
@@ -399,15 +409,14 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             }
         }
 
-        val (wasInitialized, seenSnapshot, baselinedSnapshot, prevSyncMs) = synchronized(seenLock) {
-            listOf(baselineInitialized, seenKeysSet.toSet(), baselinedFolderIds.toSet(), lastSyncMs)
+        val (initFlag, seenCopy, baselinedCopy, syncMs) = synchronized(seenLock) {
+            SeenSnapshot(
+                initialized = baselineInitialized,
+                seenKeys = seenKeysSet.toSet(),
+                baselinedFolders = baselinedFolderIds.toSet(),
+                lastSyncMs = lastSyncMs
+            )
         }
-        val initFlag = wasInitialized as Boolean
-        @Suppress("UNCHECKED_CAST")
-        val seenCopy = seenSnapshot as Set<String>
-        @Suppress("UNCHECKED_CAST")
-        val baselinedCopy = baselinedSnapshot as Set<String>
-        val syncMs = prevSyncMs as Long
 
         val incomingKeys = unread.flatMap(::seenKeysFor).toMutableList()
         var cache: MutableList<MailFolder>? = initialCache
@@ -513,6 +522,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 searchQuery = "",
                 searchAllFolders = false,
                 messages = emptyList(),
+                selectedIds = emptySet(),
                 reachedEnd = true,
                 rightPane = if (it.rightPane is DesktopRightPane.MessageDetail) DesktopRightPane.Empty else it.rightPane
             )
@@ -527,7 +537,8 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         _state.update {
             it.copy(
                 filter = filter,
-                includeSubfoldersInFolder = if (filter == MailFilter.ALL) true else it.includeSubfoldersInFolder
+                includeSubfoldersInFolder = if (filter == MailFilter.ALL) true else it.includeSubfoldersInFolder,
+                selectedIds = emptySet()
             )
         }
         loadMessages(offset = 0, reset = true)
@@ -535,17 +546,17 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
 
     fun setIncludeSubfolders(include: Boolean) {
         if (_state.value.includeSubfoldersInFolder == include) return
-        _state.update { it.copy(includeSubfoldersInFolder = include) }
+        _state.update { it.copy(includeSubfoldersInFolder = include, selectedIds = emptySet()) }
         loadMessages(offset = 0, reset = true)
     }
 
     fun search(query: String) {
-        _state.update { it.copy(searchQuery = query) }
+        _state.update { it.copy(searchQuery = query, selectedIds = emptySet()) }
         loadMessages(offset = 0, reset = true)
     }
 
     fun setSearchAllFolders(enabled: Boolean) {
-        _state.update { it.copy(searchAllFolders = enabled) }
+        _state.update { it.copy(searchAllFolders = enabled, selectedIds = emptySet()) }
         if (_state.value.searchQuery.isNotBlank()) loadMessages(offset = 0, reset = true)
     }
 
@@ -657,18 +668,27 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         effectiveIds.size > 1 -> deduplicateSummaries(st.messages + items)
                         else -> (st.messages + items).distinctBy { it.id }
                     }
+                    val nextSelectedIds = if (reset) {
+                        val visibleIds = merged.mapTo(HashSet()) { it.id }
+                        st.selectedIds.filterTo(HashSet()) { it in visibleIds }
+                    } else {
+                        st.selectedIds
+                    }
                     st.copy(
                         isLoading = false,
                         isRefreshing = false,
                         folders = folders,
                         currentFolder = updatedCurrent,
                         messages = merged,
+                        selectedIds = nextSelectedIds,
                         reachedEnd = includesLast
                     )
                 }
                 if (query.isBlank()) {
                     applyAutoSortToMessages(c, items, updatedCurrent)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _state.update {
                     it.copy(isLoading = false, isRefreshing = false, errorMessage = e.message ?: "Не удалось загрузить письма")
@@ -710,7 +730,8 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         folders = nextFolders,
                         currentFolder = nextCur,
                         settings = settingsStore.load(),
-                        messages = st.messages.filterNot { it.id in movedIds }
+                        messages = st.messages.filterNot { it.id in movedIds },
+                        selectedIds = st.selectedIds - movedIds
                     )
                 }
             } else if (!sortError.isNullOrBlank()) {
@@ -784,6 +805,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         isLoading = false,
                         folders = folders,
                         currentFolder = if (switched) fallback else it.currentFolder,
+                        selectedIds = if (switched) emptySet() else it.selectedIds,
                         toastMessage = "Папка удалена"
                     )
                 }
@@ -809,6 +831,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         folders = folders,
                         currentFolder = updated,
                         messages = emptyList(),
+                        selectedIds = emptySet(),
                         reachedEnd = true,
                         selectedMessage = null,
                         rightPane = DesktopRightPane.Empty,
@@ -847,6 +870,163 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                 }
             } catch (e: Exception) {
                 _state.update { it.copy(isLoading = false, toastMessage = e.message ?: "Ошибка обновления писем") }
+            }
+        }
+    }
+
+    // --- Multi-selection & Batch Actions ---
+
+    fun toggleSelection(id: String) {
+        _state.update { st ->
+            val next = if (id in st.selectedIds) st.selectedIds - id else st.selectedIds + id
+            st.copy(selectedIds = next)
+        }
+    }
+
+    fun toggleSelectAllVisible() {
+        _state.update { st ->
+            if (st.messages.isEmpty()) return@update st
+            val allVisibleIds = st.messages.mapTo(HashSet()) { it.id }
+            val next = if (st.messages.all { it.id in st.selectedIds }) {
+                emptySet()
+            } else {
+                allVisibleIds
+            }
+            st.copy(selectedIds = next)
+        }
+    }
+
+    fun clearSelection() {
+        if (_state.value.selectedIds.isEmpty()) return
+        _state.update { it.copy(selectedIds = emptySet()) }
+    }
+
+    fun batchSetRead(isRead: Boolean) {
+        val c = client ?: return
+        val ids = _state.value.selectedIds
+        val targets = _state.value.messages.filter { it.id in ids }
+        if (targets.isEmpty()) return
+        scope.launch {
+            try {
+                c.setRead(targets.map { it.id to it.changeKey }, isRead)
+                var deltasByFolder: Map<String, Int> = emptyMap()
+                _state.update { st ->
+                    val deltas = mutableMapOf<String, Int>()
+                    val step = if (isRead) -1 else 1
+                    for (msg in st.messages) {
+                        if (msg.id in ids && msg.isRead != isRead) {
+                            val fid = msg.parentFolderId.ifBlank { st.currentFolder?.id.orEmpty() }
+                            if (fid.isNotBlank()) deltas[fid] = (deltas[fid] ?: 0) + step
+                        }
+                    }
+                    deltasByFolder = deltas
+                    val nextFolders = applyFolderUnreadDeltas(st.folders, deltas)
+                    val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
+                    st.copy(
+                        folders = nextFolders,
+                        currentFolder = nextCur,
+                        selectedIds = emptySet(),
+                        selectedMessage = st.selectedMessage?.let { sel ->
+                            if (sel.id in ids) sel.copy(isRead = isRead) else sel
+                        },
+                        messages = st.messages.map { if (it.id in ids) it.copy(isRead = isRead) else it },
+                        toastMessage = if (isRead) "Отмечены прочитанными" else "Отмечены непрочитанными"
+                    )
+                }
+                val affectedIds = deltasByFolder.keys
+                if (affectedIds.size > 1) {
+                    val updated = runCatching { c.getFolders() }.getOrNull()
+                    if (updated != null) {
+                        _state.update { st ->
+                            st.copy(
+                                folders = updated,
+                                currentFolder = st.currentFolder?.let { cur -> updated.firstOrNull { it.id == cur.id } ?: cur }
+                            )
+                        }
+                    }
+                } else {
+                    refreshSubtreeFoldersIfNested(c, affectedIds.singleOrNull() ?: _state.value.currentFolder?.id)
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
+            }
+        }
+    }
+
+    fun batchMove(target: MailFolder) {
+        val c = client ?: return
+        val ids = _state.value.selectedIds
+        val targets = _state.value.messages.filter { it.id in ids }
+        if (targets.isEmpty()) return
+        scope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                c.moveMessages(targets.map { it.id to it.changeKey }, target.id)
+                val folders = runCatching { c.getFolders() }.getOrNull()
+                _state.update { st ->
+                    val nextFolders = folders ?: st.folders
+                    val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
+                    val closeDetail = st.selectedMessage?.id in ids
+                    st.copy(
+                        isLoading = false,
+                        folders = nextFolders,
+                        currentFolder = nextCur,
+                        selectedIds = emptySet(),
+                        selectedMessage = if (closeDetail) null else st.selectedMessage,
+                        rightPane = if (closeDetail && st.rightPane is DesktopRightPane.MessageDetail) DesktopRightPane.Empty else st.rightPane,
+                        messages = st.messages.filterNot { it.id in ids },
+                        toastMessage = "Перемещено в «${target.displayName}»"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(isLoading = false, toastMessage = e.message ?: "Не удалось переместить письма") }
+            }
+        }
+    }
+
+    fun batchDelete() {
+        val c = client ?: return
+        val snapshot = _state.value
+        val ids = snapshot.selectedIds
+        val targets = snapshot.messages.filter { it.id in ids }
+        if (targets.isEmpty()) return
+        val deletedId = snapshot.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }?.id
+        val inDeletedFolder = snapshot.currentFolder?.systemKind == SystemFolderKind.DELETED
+        val (hardTargets, softTargets) = targets.partition {
+            inDeletedFolder || (deletedId != null && it.parentFolderId == deletedId)
+        }
+        scope.launch {
+            _state.update { it.copy(isLoading = true) }
+            try {
+                if (hardTargets.isNotEmpty()) {
+                    c.deleteMessages(hardTargets.map { it.id to it.changeKey }, hardDelete = true)
+                }
+                if (softTargets.isNotEmpty()) {
+                    c.deleteMessages(softTargets.map { it.id to it.changeKey }, hardDelete = false)
+                }
+                val folders = runCatching { c.getFolders() }.getOrNull()
+                val toast = when {
+                    softTargets.isEmpty() -> "Удалено навсегда"
+                    hardTargets.isEmpty() -> "Перемещено в Удалённые"
+                    else -> "Письма удалены"
+                }
+                _state.update { st ->
+                    val nextFolders = folders ?: st.folders
+                    val nextCur = st.currentFolder?.let { cur -> nextFolders.firstOrNull { it.id == cur.id } ?: cur }
+                    val closeDetail = st.selectedMessage?.id in ids
+                    st.copy(
+                        isLoading = false,
+                        folders = nextFolders,
+                        currentFolder = nextCur,
+                        selectedIds = emptySet(),
+                        selectedMessage = if (closeDetail) null else st.selectedMessage,
+                        rightPane = if (closeDetail && st.rightPane is DesktopRightPane.MessageDetail) DesktopRightPane.Empty else st.rightPane,
+                        messages = st.messages.filterNot { it.id in ids },
+                        toastMessage = toast
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(isLoading = false, toastMessage = e.message ?: "Не удалось удалить письма") }
             }
         }
     }
@@ -1026,6 +1206,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         folders = nextFolders,
                         currentFolder = nextCur,
                         selectedMessage = null,
+                        selectedIds = st.selectedIds - detail.id,
                         rightPane = DesktopRightPane.Empty,
                         messages = st.messages.filterNot { it.id == detail.id },
                         toastMessage = "Перемещено в «${target.displayName}»"
@@ -1065,6 +1246,7 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                         folders = nextFolders,
                         currentFolder = nextCur,
                         selectedMessage = null,
+                        selectedIds = st.selectedIds - detail.id,
                         rightPane = DesktopRightPane.Empty,
                         messages = st.messages.filterNot { it.id == detail.id },
                         toastMessage = if (hardDelete) "Удалено навсегда" else "Перемещено в Удалённые"

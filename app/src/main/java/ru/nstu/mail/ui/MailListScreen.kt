@@ -124,6 +124,7 @@ import ru.nstu.mail.data.formatMailDate
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.resolveDisplayName
+import ru.nstu.mail.data.shouldBatchMarkAsRead
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -201,9 +202,15 @@ fun MailListScreen(
     }
 
     if (showMovePicker) {
+        val uniqueParentId = state.messages
+            .filter { it.id in state.selectedIds }
+            .map { it.parentFolderId.ifBlank { state.currentFolder?.id.orEmpty() } }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .singleOrNull()
         FolderPickerDialog(
             folders = state.folders,
-            excludeFolderId = state.currentFolder?.id,
+            excludeFolderId = uniqueParentId,
             onDismiss = { showMovePicker = false },
             onSelect = { target ->
                 showMovePicker = false
@@ -582,8 +589,12 @@ fun MailListScreen(
                             }
                         },
                         actions = {
-                            IconButton(onClick = { onBatchSetRead(true) }) {
-                                Icon(Icons.Default.MarkEmailRead, contentDescription = "Прочитано")
+                            val markAsRead = shouldBatchMarkAsRead(state.messages, state.selectedIds)
+                            IconButton(onClick = { onBatchSetRead(markAsRead) }) {
+                                Icon(
+                                    imageVector = if (markAsRead) Icons.Default.MarkEmailRead else Icons.Default.MarkEmailUnread,
+                                    contentDescription = if (markAsRead) "Прочитано" else "Непрочитано"
+                                )
                             }
                             IconButton(onClick = { showMovePicker = true }) {
                                 Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = "Переместить")

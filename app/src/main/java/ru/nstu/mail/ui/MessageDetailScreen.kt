@@ -193,10 +193,17 @@ fun MessageDetailScreen(
         )
     }
 
+    val junkFolderId = remember(folders) { folders.firstOrNull { it.systemKind == SystemFolderKind.JUNK }?.id }
+    val deletedFolderId = remember(folders) { folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }?.id }
+    val isInJunk = currentFolder?.systemKind == SystemFolderKind.JUNK ||
+        (junkFolderId != null && detail.parentFolderId == junkFolderId)
+    val isInDeleted = currentFolder?.systemKind == SystemFolderKind.DELETED ||
+        (deletedFolderId != null && detail.parentFolderId == deletedFolderId)
+
     if (showMovePicker) {
         FolderPickerDialog(
             folders = folders,
-            excludeFolderId = currentFolder?.id,
+            excludeFolderId = detail.parentFolderId.ifBlank { currentFolder?.id },
             onDismiss = { showMovePicker = false },
             onSelect = { target ->
                 showMovePicker = false
@@ -211,7 +218,7 @@ fun MessageDetailScreen(
             title = { Text("Удалить письмо?") },
             text = {
                 Text(
-                    if (currentFolder?.systemKind == SystemFolderKind.DELETED) {
+                    if (isInDeleted) {
                         "Письмо будет удалено безвозвратно."
                     } else {
                         "Письмо будет перемещено в папку «Удалённые»."
@@ -302,7 +309,7 @@ fun MessageDetailScreen(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentFolder?.systemKind == SystemFolderKind.JUNK) {
+                                        if (isInJunk) {
                                             "Не спам (во Входящие)"
                                         } else {
                                             "В спам"
@@ -311,7 +318,7 @@ fun MessageDetailScreen(
                                 },
                                 leadingIcon = {
                                     Icon(
-                                        if (currentFolder?.systemKind == SystemFolderKind.JUNK) {
+                                        if (isInJunk) {
                                             Icons.Default.Inbox
                                         } else {
                                             Icons.Default.Report
@@ -617,7 +624,7 @@ private fun formatBytes(bytes: Long): String = when {
     bytes <= 0L -> "0 Б"
     bytes < 1024 -> "$bytes Б"
     bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
-    else -> String.format("%.1f МБ", bytes / (1024.0 * 1024.0))
+    else -> String.format(java.util.Locale.getDefault(), "%.1f МБ", bytes / (1024.0 * 1024.0))
 }
 
 @Composable

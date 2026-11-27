@@ -4,6 +4,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -32,7 +36,18 @@ fun main() = application {
             exitApplication()
         },
         title = "Почта НГТУ",
-        state = rememberWindowState(size = DpSize(1240.dp, 800.dp))
+        state = rememberWindowState(size = DpSize(1240.dp, 800.dp)),
+        onPreviewKeyEvent = { ev ->
+            if (ev.type == KeyEventType.KeyDown &&
+                ev.key == Key.Escape &&
+                state.selectedIds.isNotEmpty()
+            ) {
+                controller.clearSelection()
+                true
+            } else {
+                false
+            }
+        }
     ) {
         LaunchedEffectOnce(window, icon)
         DesktopNstuTheme(themeMode = state.settings.themeMode) {

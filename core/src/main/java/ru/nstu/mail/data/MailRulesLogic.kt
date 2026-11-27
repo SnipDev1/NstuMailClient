@@ -398,3 +398,21 @@ fun compareSemVer(a: String, b: String): Int {
     }
     return 0
 }
+
+/** Applies multiple folder unread count deltas in order. */
+fun applyFolderUnreadDeltas(
+    folders: List<MailFolder>,
+    deltasByFolderId: Map<String, Int>
+): List<MailFolder> {
+    var acc = folders
+    for ((folderId, delta) in deltasByFolderId) {
+        if (delta != 0 && folderId.isNotBlank()) {
+            acc = adjustFolderUnreadDelta(acc, folderId, delta)
+        }
+    }
+    return acc
+}
+
+/** Returns true when a batch read toggle should mark selected items as read. */
+fun shouldBatchMarkAsRead(messages: List<EmailSummary>, selectedIds: Set<String>): Boolean =
+    messages.any { it.id in selectedIds && !it.isRead }

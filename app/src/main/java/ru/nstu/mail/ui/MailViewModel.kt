@@ -55,6 +55,7 @@ import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.UpdateChannel
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.applyFolderUnreadDeltas
 import ru.nstu.mail.data.buildAutoSortFromFolderTree
 import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
@@ -869,6 +870,8 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                 if (query.isBlank()) {
                     applyAutoSortToMessages(c, items, updatedCurrent)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _state.update {
                     it.copy(
@@ -1078,10 +1081,18 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 c.setRead(pairs, isRead)
+                var deltasByFolder: Map<String, Int> = emptyMap()
                 _state.update { st ->
-                    val changedCount = st.messages.count { it.id in ids && it.isRead != isRead }
-                    val delta = if (isRead) -changedCount else changedCount
-                    val nextFolders = adjustFolderUnreadDelta(st.folders, st.currentFolder?.id, delta)
+                    val deltas = mutableMapOf<String, Int>()
+                    val step = if (isRead) -1 else 1
+                    for (msg in st.messages) {
+                        if (msg.id in ids && msg.isRead != isRead) {
+                            val fid = msg.parentFolderId.ifBlank { st.currentFolder?.id.orEmpty() }
+                            if (fid.isNotBlank()) deltas[fid] = (deltas[fid] ?: 0) + step
+                        }
+                    }
+                    deltasByFolder = deltas
+                    val nextFolders = applyFolderUnreadDeltas(st.folders, deltas)
                     val nextCurrent = st.currentFolder?.let { cur ->
                         nextFolders.firstOrNull { it.id == cur.id } ?: cur
                     }
@@ -1089,13 +1100,31 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         folders = nextFolders,
                         currentFolder = nextCurrent,
                         selectedIds = emptySet(),
+                        selectedMessage = st.selectedMessage?.let { sel ->
+                            if (sel.id in ids) sel.copy(isRead = isRead) else sel
+                        },
                         messages = st.messages.map {
                             if (it.id in ids) it.copy(isRead = isRead) else it
                         },
                         toastMessage = if (isRead) "Отмечены прочитанными" else "Отмечены непрочитанными"
                     )
                 }
-                refreshSubtreeFoldersIfNested(c, _state.value.currentFolder?.id)
+                val affectedIds = deltasByFolder.keys
+                if (affectedIds.size > 1) {
+                    viewModelScope.launch {
+                        val updated = runCatching { c.getFolders() }.getOrNull() ?: return@launch
+                        _state.update { st ->
+                            st.copy(
+                                folders = updated,
+                                currentFolder = st.currentFolder?.let { cur ->
+                                    updated.firstOrNull { it.id == cur.id } ?: cur
+                                }
+                            )
+                        }
+                    }
+                } else {
+                    refreshSubtreeFoldersIfNested(c, affectedIds.singleOrNull() ?: _state.value.currentFolder?.id)
+                }
             } catch (e: Exception) {
                 _state.update { it.copy(toastMessage = e.message ?: "Ошибка") }
             }
@@ -1143,6 +1172,7 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         folders = folders,
                         currentFolder = updatedCurrent,
                         selectedIds = emptySet(),
+                        selectedMessage = if (st.selectedMessage?.id in ids) null else st.selectedMessage,
                         messages = st.messages.filterNot { it.id in ids },
                         toastMessage = "Перемещено в «${targetFolder.displayName}»"
                     )
@@ -1160,15 +1190,30 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
     fun batchDelete() {
         val c = client ?: return
-        val ids = _state.value.selectedIds
-        val pairs = _state.value.messages.filter { it.id in ids }.map { it.id to it.changeKey }
-        if (pairs.isEmpty()) return
-        val hardDelete = _state.value.currentFolder?.systemKind == SystemFolderKind.DELETED
+        val snapshot = _state.value
+        val ids = snapshot.selectedIds
+        val targets = snapshot.messages.filter { it.id in ids }
+        if (targets.isEmpty()) return
+        val deletedId = snapshot.folders.firstOrNull { it.systemKind == SystemFolderKind.DELETED }?.id
+        val inDeletedFolder = snapshot.currentFolder?.systemKind == SystemFolderKind.DELETED
+        val (hardTargets, softTargets) = targets.partition {
+            inDeletedFolder || (deletedId != null && it.parentFolderId == deletedId)
+        }
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true) }
             try {
-                c.deleteMessages(pairs, hardDelete)
+                if (hardTargets.isNotEmpty()) {
+                    c.deleteMessages(hardTargets.map { it.id to it.changeKey }, hardDelete = true)
+                }
+                if (softTargets.isNotEmpty()) {
+                    c.deleteMessages(softTargets.map { it.id to it.changeKey }, hardDelete = false)
+                }
                 val folders = c.getFolders()
+                val toast = when {
+                    softTargets.isEmpty() -> "Удалено навсегда"
+                    hardTargets.isEmpty() -> "Перемещено в Удалённые"
+                    else -> "Письма удалены"
+                }
                 _state.update { st ->
                     val updatedCurrent = st.currentFolder?.let { cur ->
                         folders.firstOrNull { it.id == cur.id } ?: cur
@@ -1178,8 +1223,9 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                         folders = folders,
                         currentFolder = updatedCurrent,
                         selectedIds = emptySet(),
+                        selectedMessage = if (st.selectedMessage?.id in ids) null else st.selectedMessage,
                         messages = st.messages.filterNot { it.id in ids },
-                        toastMessage = if (hardDelete) "Удалено навсегда" else "Перемещено в Удалённые"
+                        toastMessage = toast
                     )
                 }
             } catch (e: Exception) {
