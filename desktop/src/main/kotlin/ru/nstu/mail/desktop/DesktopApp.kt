@@ -1,7 +1,9 @@
 package ru.nstu.mail.desktop
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -161,6 +163,7 @@ import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.UNSORTED_FOLDER_NAME
 import ru.nstu.mail.data.avatarPaletteIndex
+import ru.nstu.mail.data.buildComposeInitialRecipients
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractInitials
 import ru.nstu.mail.data.extractSubjectTagHierarchies
@@ -174,6 +177,7 @@ import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseRecipientTokens
 import ru.nstu.mail.data.parseTagPath
 import ru.nstu.mail.data.participants
+import ru.nstu.mail.data.profileSmtpKeys
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
 import ru.nstu.mail.data.shouldBatchMarkAsRead
@@ -886,16 +890,19 @@ private fun DesktopWorkspace(
                                     avatars = avatars,
                                     profiles = profiles,
                                     knownNames = knownNames,
+                                    mutedSenders = state.settings.mutedSenders,
                                     showCompactBack = showRightOnlyInCompact,
                                     onBackCompact = controller::closeRightPane,
                                     onRequestAvatar = controller::requestAvatar,
                                     onRequestProfile = controller::requestPersonProfile,
                                     onSelectPerson = { selectedPerson = it },
+                                    onToggleSenderNotifications = controller::toggleSenderNotifications,
                                     onToggleRead = { controller.toggleReadDetail(detail) },
                                     onToggleFlag = { controller.toggleFlagDetail(detail) },
                                     onReply = { controller.openCompose(replyTo = detail) },
                                     onReplyAll = { controller.openCompose(replyTo = detail, replyAll = true) },
                                     onForward = { controller.openCompose(replyTo = detail, isForward = true) },
+                                    onEditDraft = { controller.openCompose(draft = detail) },
                                     onMove = { moveMessageTarget = detail },
                                     onToggleSpam = { controller.toggleSpamDetail(detail) },
                                     onDelete = { controller.deleteDetail(detail) },
@@ -1228,6 +1235,33 @@ private fun DesktopEmailListItem(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DesktopTooltipIconButton(
+    tooltip: String,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    TooltipArea(
+        tooltip = {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.inverseSurface,
+                shadowElevation = 4.dp
+            ) {
+                Text(
+                    text = tooltip,
+                    color = MaterialTheme.colorScheme.inverseOnSurface,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+        }
+    ) {
+        IconButton(onClick = onClick, modifier = Modifier.size(36.dp), content = content)
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DesktopMessageDetailPane(
@@ -1237,16 +1271,19 @@ private fun DesktopMessageDetailPane(
     avatars: Map<String, ImageBitmap?>,
     profiles: Map<String, PersonProfile?>,
     knownNames: Map<String, String>,
+    mutedSenders: Set<String>,
     showCompactBack: Boolean,
     onBackCompact: () -> Unit,
     onRequestAvatar: (String) -> Unit,
     onRequestProfile: (String, String) -> Unit,
     onSelectPerson: (EmailParticipant) -> Unit,
+    onToggleSenderNotifications: (String) -> Unit,
     onToggleRead: () -> Unit,
     onToggleFlag: () -> Unit,
     onReply: () -> Unit,
     onReplyAll: () -> Unit,
     onForward: () -> Unit,
+    onEditDraft: () -> Unit,
     onMove: () -> Unit,
     onToggleSpam: () -> Unit,
     onDelete: () -> Unit,
@@ -1257,6 +1294,7 @@ private fun DesktopMessageDetailPane(
 ) {
     var forceLight by remember(detail.id, defaultLightBody) { mutableStateOf(defaultLightBody) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var moreMenuExpanded by remember { mutableStateOf(false) }
 
     if (confirmDelete) {
         AlertDialog(
@@ -1294,21 +1332,108 @@ private fun DesktopMessageDetailPane(
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 if (showCompactBack) {
-                    IconButton(onClick = onBackCompact, modifier = Modifier.size(36.dp)) {
+                    DesktopTooltipIconButton(tooltip = "Назад", onClick = onBackCompact) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", modifier = Modifier.size(20.dp))
                     }
                 }
-                IconButton(onClick = onReply, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.Reply, "Ответить", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onReplyAll, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.ReplyAll, "Ответить всем", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onForward, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.Forward, "Переслать", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onToggleRead, modifier = Modifier.size(36.dp)) { Icon(if (detail.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead, "Статус прочтения", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onToggleFlag, modifier = Modifier.size(36.dp)) { Icon(if (detail.isFlagged) Icons.Default.Star else Icons.Default.StarBorder, "Флажок", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onMove, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Переместить", modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onToggleSpam, modifier = Modifier.size(36.dp)) { Icon(if (isInJunk) Icons.Default.Inbox else Icons.Default.Report, "Спам", modifier = Modifier.size(20.dp)) }
-                if (darkTheme) {
-                    IconButton(onClick = { forceLight = !forceLight }, modifier = Modifier.size(36.dp)) { Icon(if (forceLight) Icons.Default.DarkMode else Icons.Default.LightMode, "Фон письма", modifier = Modifier.size(20.dp)) }
+                if (detail.isDraft) {
+                    DesktopTooltipIconButton(tooltip = "Редактировать черновик", onClick = onEditDraft) {
+                        Icon(Icons.Default.Edit, "Редактировать черновик", modifier = Modifier.size(20.dp))
+                    }
                 }
-                IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Delete, "Удалить", modifier = Modifier.size(20.dp)) }
+                DesktopTooltipIconButton(tooltip = "Флажок", onClick = onToggleFlag) {
+                    Icon(
+                        imageVector = if (detail.isFlagged) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = "Флажок",
+                        tint = if (detail.isFlagged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                DesktopTooltipIconButton(tooltip = "Ответить", onClick = onReply) {
+                    Icon(Icons.AutoMirrored.Filled.Reply, "Ответить", modifier = Modifier.size(20.dp))
+                }
+                DesktopTooltipIconButton(tooltip = "Ответить всем", onClick = onReplyAll) {
+                    Icon(Icons.AutoMirrored.Filled.ReplyAll, "Ответить всем", modifier = Modifier.size(20.dp))
+                }
+                DesktopTooltipIconButton(tooltip = "Переместить", onClick = onMove) {
+                    Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Переместить", modifier = Modifier.size(20.dp))
+                }
+                Box {
+                    DesktopTooltipIconButton(tooltip = "Ещё", onClick = { moreMenuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, "Ещё", modifier = Modifier.size(20.dp))
+                    }
+                    DropdownMenu(
+                        expanded = moreMenuExpanded,
+                        onDismissRequest = { moreMenuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Переслать") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Forward, null) },
+                            onClick = { moreMenuExpanded = false; onForward() }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (detail.isRead) "Отметить непрочитанным" else "Отметить прочитанным")
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    if (detail.isRead) Icons.Default.MarkEmailUnread else Icons.Default.MarkEmailRead,
+                                    null
+                                )
+                            },
+                            onClick = { moreMenuExpanded = false; onToggleRead() }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (isInJunk) "Не спам (во Входящие)" else "В спам")
+                            },
+                            leadingIcon = {
+                                Icon(if (isInJunk) Icons.Default.Inbox else Icons.Default.Report, null)
+                            },
+                            onClick = { moreMenuExpanded = false; onToggleSpam() }
+                        )
+                        if (detail.fromEmail.isNotBlank()) {
+                            val fromMuted = detail.fromEmail.trim().lowercase() in mutedSenders
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (fromMuted) "Уведомления от отправителя: выкл (вкл.)"
+                                        else "Уведомления от отправителя: вкл (выкл.)"
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (fromMuted) Icons.Default.NotificationsOff else Icons.Default.Notifications,
+                                        null
+                                    )
+                                },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    onToggleSenderNotifications(detail.fromEmail)
+                                }
+                            )
+                        }
+                        if (darkTheme) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(if (forceLight) "Тёмный фон письма" else "Светлый фон письма")
+                                },
+                                leadingIcon = {
+                                    Icon(if (forceLight) Icons.Default.DarkMode else Icons.Default.LightMode, null)
+                                },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    forceLight = !forceLight
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Удалить") },
+                            leadingIcon = { Icon(Icons.Default.Delete, null) },
+                            onClick = { moreMenuExpanded = false; confirmDelete = true }
+                        )
+                    }
+                }
             }
             Text(
                 text = formatMailDate(detail.receivedAt, detailed = true),
@@ -1684,73 +1809,42 @@ private fun DesktopComposePane(
     fun makeRecipient(name: String, email: String) =
         DesktopComposeRecipient(id = idSeq.getAndIncrement(), name = name, email = email)
 
+    val selfEmails = remember(currentUserEmail, profiles) {
+        profileSmtpKeys(currentUserEmail, profiles[currentUserEmail.trim().lowercase()]).toSet()
+    }
+    val initialRecipients = remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName, selfEmails) {
+        buildComposeInitialRecipients(
+            selfEmails = selfEmails,
+            replyTo = replyTo,
+            replyAll = replyAll,
+            isForward = isForward,
+            draft = draft,
+            prefillTo = prefillTo,
+            prefillName = prefillName
+        )
+    }
     var toRecipients by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) {
-        mutableStateOf<List<DesktopComposeRecipient>>(
-            when {
-                draft != null -> draft.to.mapNotNull { raw ->
-                    val (n, e) = parseFormattedRecipient(raw)
-                    if (e.isNotBlank()) makeRecipient(n, e) else null
-                }
-                !prefillTo.isNullOrBlank() -> {
-                    val clean = prefillTo.trim()
-                    listOf(makeRecipient(prefillName.orEmpty().ifBlank { clean }, clean))
-                }
-                replyTo != null && !isForward && replyAll -> {
-                    val rawPairs = buildList {
-                        if (replyTo.fromEmail.isNotBlank()) {
-                            add(replyTo.from to replyTo.fromEmail)
-                        }
-                        replyTo.to.forEach { add(parseFormattedRecipient(it)) }
-                    }
-                    rawPairs
-                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
-                        .distinctBy { it.second.lowercase() }
-                        .map { (n, e) -> makeRecipient(n, e) }
-                }
-                replyTo != null && !isForward && replyTo.fromEmail.isNotBlank() ->
-                    listOf(makeRecipient(replyTo.from, replyTo.fromEmail))
-                else -> emptyList()
-            }
-        )
+        mutableStateOf(initialRecipients.to.map { (n, e) -> makeRecipient(n, e) })
     }
-    var ccRecipients by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) {
-        mutableStateOf<List<DesktopComposeRecipient>>(
-            when {
-                draft != null -> draft.cc.mapNotNull { raw ->
-                    val (n, e) = parseFormattedRecipient(raw)
-                    if (e.isNotBlank()) makeRecipient(n, e) else null
-                }
-                replyTo != null && replyAll && !isForward ->
-                    replyTo.cc
-                        .map { parseFormattedRecipient(it) }
-                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
-                        .distinctBy { it.second.lowercase() }
-                        .map { (n, e) -> makeRecipient(n, e) }
-                else -> emptyList()
-            }
-        )
+    var ccRecipients by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) {
+        mutableStateOf(initialRecipients.cc.map { (n, e) -> makeRecipient(n, e) })
     }
-    var bccRecipients by remember(draft?.id, replyTo?.id, prefillTo) {
-        mutableStateOf<List<DesktopComposeRecipient>>(
-            draft?.bcc.orEmpty().mapNotNull { raw ->
-                val (n, e) = parseFormattedRecipient(raw)
-                if (e.isNotBlank()) makeRecipient(n, e) else null
-            }
-        )
+    var bccRecipients by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) {
+        mutableStateOf(initialRecipients.bcc.map { (n, e) -> makeRecipient(n, e) })
     }
-    var showCc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(ccRecipients.isNotEmpty()) }
-    var showBcc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf(bccRecipients.isNotEmpty()) }
+    var showCc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf(ccRecipients.isNotEmpty()) }
+    var showBcc by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf(bccRecipients.isNotEmpty()) }
 
-    var toInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf("") }
-    var ccInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf("") }
-    var bccInput by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf("") }
+    var toInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf("") }
+    var ccInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf("") }
+    var bccInput by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf("") }
 
     var activeField by remember { mutableStateOf(ActiveDesktopRecipientField.TO) }
     var editingField by remember { mutableStateOf<ActiveDesktopRecipientField?>(null) }
     var editingId by remember { mutableStateOf<Long?>(null) }
     var editingText by remember { mutableStateOf("") }
 
-    val initialSubj = remember(draft?.id, replyTo?.id, isForward, prefillTo) {
+    val initialSubj = remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) {
         when {
             draft != null -> if (draft.subject == "(Без темы)") {
                 emptyList<List<String>>() to ""
@@ -1762,10 +1856,10 @@ private fun DesktopComposePane(
             else -> emptyList<List<String>>() to (if (replyTo.subject.startsWith("Re:", true)) replyTo.subject else "Re: ${replyTo.subject}")
         }
     }
-    var savedHierarchies by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf(initialSubj.first) }
-    var activePath by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf<List<String>>(emptyList()) }
-    var subject by remember(draft?.id, replyTo?.id, prefillTo) { mutableStateOf(initialSubj.second) }
-    var body by remember(draft?.id, replyTo?.id, prefillTo) {
+    var savedHierarchies by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf(initialSubj.first) }
+    var activePath by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf<List<String>>(emptyList()) }
+    var subject by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf(initialSubj.second) }
+    var body by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) {
         mutableStateOf(
             when {
                 draft != null -> if (draft.isHtml) htmlToPlainBody(draft.body) else draft.body
@@ -1777,7 +1871,7 @@ private fun DesktopComposePane(
             }
         )
     }
-    var attachments by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo) { mutableStateOf<List<File>>(emptyList()) }
+    var attachments by remember(draft?.id, replyTo?.id, replyAll, isForward, prefillTo, prefillName) { mutableStateOf<List<File>>(emptyList()) }
     var showSendConfirm by remember { mutableStateOf(false) }
     var showAddTagDialog by remember { mutableStateOf(false) }
     val allHierarchies = (savedHierarchies + listOfNotNull(activePath.takeIf { it.isNotEmpty() })).distinctBy { formatTagPath(it).lowercase() }

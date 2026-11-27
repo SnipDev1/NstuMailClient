@@ -106,6 +106,82 @@ fun finalizeRecipientToken(raw: String): Pair<String, String>? {
     }
 }
 
+data class ComposeInitialRecipients(
+    val to: List<Pair<String, String>>,
+    val cc: List<Pair<String, String>>,
+    val bcc: List<Pair<String, String>>
+)
+
+fun buildComposeInitialRecipients(
+    selfEmails: Set<String>,
+    replyTo: EmailDetail?,
+    replyAll: Boolean,
+    isForward: Boolean,
+    draft: EmailDetail?,
+    prefillTo: String? = null,
+    prefillName: String? = null
+): ComposeInitialRecipients {
+    val normSelf = selfEmails.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
+    if (draft != null) {
+        return ComposeInitialRecipients(
+            to = draft.to.map(::parseFormattedRecipient).filter { it.second.isNotBlank() },
+            cc = draft.cc.map(::parseFormattedRecipient).filter { it.second.isNotBlank() },
+            bcc = draft.bcc.map(::parseFormattedRecipient).filter { it.second.isNotBlank() }
+        )
+    }
+    if (!prefillTo.isNullOrBlank()) {
+        val clean = prefillTo.trim()
+        return ComposeInitialRecipients(
+            to = listOf(prefillName.orEmpty().trim().ifBlank { clean } to clean),
+            cc = emptyList(),
+            bcc = emptyList()
+        )
+    }
+    if (replyTo == null || isForward) {
+        return ComposeInitialRecipients(emptyList(), emptyList(), emptyList())
+    }
+    if (replyAll) {
+        val toCandidates = buildList {
+            if (replyTo.fromEmail.isNotBlank()) add(replyTo.from to replyTo.fromEmail)
+            replyTo.to.forEach { add(parseFormattedRecipient(it)) }
+        }
+        val filteredTo = toCandidates
+            .filter { it.second.isNotBlank() && it.second.trim().lowercase() !in normSelf }
+            .distinctBy { it.second.trim().lowercase() }
+        val to = if (filteredTo.isEmpty() && replyTo.fromEmail.isNotBlank()) {
+            listOf(replyTo.from to replyTo.fromEmail)
+        } else {
+            filteredTo
+        }
+        val toKeys = to.map { it.second.trim().lowercase() }.toSet()
+        val cc = replyTo.cc
+            .map(::parseFormattedRecipient)
+            .filter {
+                val k = it.second.trim().lowercase()
+                k.isNotBlank() && k !in normSelf && k !in toKeys
+            }
+            .distinctBy { it.second.trim().lowercase() }
+        return ComposeInitialRecipients(to = to, cc = cc, bcc = emptyList())
+    }
+    val fromKey = replyTo.fromEmail.trim().lowercase()
+    val to = if (replyTo.fromEmail.isNotBlank() && fromKey !in normSelf) {
+        listOf(replyTo.from to replyTo.fromEmail)
+    } else {
+        val alt = replyTo.to
+            .map(::parseFormattedRecipient)
+            .filter { it.second.isNotBlank() && it.second.trim().lowercase() !in normSelf }
+            .distinctBy { it.second.trim().lowercase() }
+        if (alt.isNotEmpty()) {
+            alt
+        } else if (replyTo.fromEmail.isNotBlank()) {
+            listOf(replyTo.from to replyTo.fromEmail)
+        } else {
+            emptyList()
+        }
+    }
+    return ComposeInitialRecipients(to = to, cc = emptyList(), bcc = emptyList())
+}
+
 fun sanitizeFilename(name: String): String {
     val cleaned = name
         .replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1F]"), "_")

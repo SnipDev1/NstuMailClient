@@ -28,6 +28,7 @@ import ru.nstu.mail.data.ownSenderFolderIds
 import ru.nstu.mail.data.profileSmtpKeys
 import ru.nstu.mail.data.applyUniqueSubtreeCounts
 import ru.nstu.mail.data.buildAutoSortFromFolderTree
+import ru.nstu.mail.data.buildComposeInitialRecipients
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.collectSubtreeFolderIds
 import ru.nstu.mail.data.deduplicateSummaries
@@ -1584,5 +1585,72 @@ class EwsXmlTest {
             )
         )
         assertEquals(listOf("login@stud.nstu.ru", "primary@corp.nstu.ru", "alias@nstu.ru"), keys)
+    }
+
+    @Test
+    fun `buildComposeInitialRecipients separates reply, replyAll, forward, own sent, draft, and prefill`() {
+        val self = setOf("me@stud.nstu.ru", "me@corp.nstu.ru")
+        val incoming = EmailDetail(
+            id = "msg-1",
+            changeKey = "ck-1",
+            subject = "Совещание",
+            from = "Петров Пётр",
+            fromEmail = "petrov@corp.nstu.ru",
+            to = listOf("Я <me@corp.nstu.ru>", "Сидоров С. <sidorov@nstu.ru>"),
+            cc = listOf("Копия <cc1@nstu.ru>", "Сидоров С. <sidorov@nstu.ru>", "Я <me@stud.nstu.ru>"),
+            bcc = listOf("secret@nstu.ru"),
+            receivedAt = "2026-11-27T04:00:00Z",
+            body = "Текст",
+            isHtml = false,
+            isRead = true,
+            attachments = emptyList()
+        )
+
+        val reply = buildComposeInitialRecipients(self, incoming, replyAll = false, isForward = false, draft = null)
+        assertEquals(listOf("Петров Пётр" to "petrov@corp.nstu.ru"), reply.to)
+        assertTrue(reply.cc.isEmpty())
+        assertTrue(reply.bcc.isEmpty())
+
+        val replyAllRes = buildComposeInitialRecipients(self, incoming, replyAll = true, isForward = false, draft = null)
+        assertEquals(
+            listOf("Петров Пётр" to "petrov@corp.nstu.ru", "Сидоров С." to "sidorov@nstu.ru"),
+            replyAllRes.to
+        )
+        assertEquals(listOf("Копия" to "cc1@nstu.ru"), replyAllRes.cc)
+        assertTrue(replyAllRes.bcc.isEmpty())
+
+        val forwardRes = buildComposeInitialRecipients(self, incoming, replyAll = false, isForward = true, draft = null)
+        assertTrue(forwardRes.to.isEmpty())
+        assertTrue(forwardRes.cc.isEmpty())
+
+        val ownSent = incoming.copy(
+            from = "Я",
+            fromEmail = "me@corp.nstu.ru",
+            to = listOf("Клиент <client@nstu.ru>", "Я <me@stud.nstu.ru>")
+        )
+        val replyToSent = buildComposeInitialRecipients(self, ownSent, replyAll = false, isForward = false, draft = null)
+        assertEquals(listOf("Клиент" to "client@nstu.ru"), replyToSent.to)
+
+        val draftRes = buildComposeInitialRecipients(
+            selfEmails = self,
+            replyTo = null,
+            replyAll = false,
+            isForward = false,
+            draft = incoming.copy(to = listOf("a@nstu.ru"), cc = listOf("b@nstu.ru"), bcc = listOf("c@nstu.ru"))
+        )
+        assertEquals(listOf("a@nstu.ru" to "a@nstu.ru"), draftRes.to)
+        assertEquals(listOf("b@nstu.ru" to "b@nstu.ru"), draftRes.cc)
+        assertEquals(listOf("c@nstu.ru" to "c@nstu.ru"), draftRes.bcc)
+
+        val prefillRes = buildComposeInitialRecipients(
+            selfEmails = self,
+            replyTo = null,
+            replyAll = false,
+            isForward = false,
+            draft = null,
+            prefillTo = "new@nstu.ru",
+            prefillName = "Новый Адресат"
+        )
+        assertEquals(listOf("Новый Адресат" to "new@nstu.ru"), prefillRes.to)
     }
 }

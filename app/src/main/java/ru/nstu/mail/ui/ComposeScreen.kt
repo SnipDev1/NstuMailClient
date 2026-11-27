@@ -81,6 +81,7 @@ import ru.nstu.mail.data.EmailDetail
 import ru.nstu.mail.data.EmailImportance
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
+import ru.nstu.mail.data.buildComposeInitialRecipients
 import ru.nstu.mail.data.childTagsForPrefix
 import ru.nstu.mail.data.extractSubjectTagHierarchies
 import ru.nstu.mail.data.finalizeRecipientToken
@@ -94,6 +95,7 @@ import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseRecipientTokens
 import ru.nstu.mail.data.parseTagHierarchiesRaw
 import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.profileSmtpKeys
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeTagSegment
 import java.util.concurrent.atomic.AtomicLong
@@ -149,57 +151,29 @@ fun ComposeScreen(
     fun makeRecipient(name: String, email: String) =
         ComposeRecipient(id = idSeq.getAndIncrement(), name = name, email = email)
 
-    var toRecipients by remember {
-        mutableStateOf<List<ComposeRecipient>>(
-            when {
-                draft != null -> draft.to.mapNotNull { raw ->
-                    val (n, e) = parseFormattedRecipient(raw)
-                    if (e.isNotBlank()) makeRecipient(n, e) else null
-                }
-                replyTo != null && !isForward && replyAll -> {
-                    val rawPairs = buildList {
-                        if (replyTo.fromEmail.isNotBlank()) {
-                            add(replyTo.from to replyTo.fromEmail)
-                        }
-                        replyTo.to.forEach { add(parseFormattedRecipient(it)) }
-                    }
-                    rawPairs
-                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
-                        .distinctBy { it.second.lowercase() }
-                        .map { (n, e) -> makeRecipient(n, e) }
-                }
-                replyTo != null && !isForward && replyTo.fromEmail.isNotBlank() ->
-                    listOf(makeRecipient(replyTo.from, replyTo.fromEmail))
-                else -> emptyList()
-            }
+    val selfEmails = remember(currentUserEmail, personProfiles) {
+        profileSmtpKeys(currentUserEmail, personProfiles[currentUserEmail.trim().lowercase()]).toSet()
+    }
+    val initialRecipients = remember(draft?.id, replyTo?.id, replyAll, isForward, selfEmails) {
+        buildComposeInitialRecipients(
+            selfEmails = selfEmails,
+            replyTo = replyTo,
+            replyAll = replyAll,
+            isForward = isForward,
+            draft = draft
         )
+    }
+
+    var toRecipients by remember {
+        mutableStateOf(initialRecipients.to.map { (n, e) -> makeRecipient(n, e) })
     }
 
     var ccRecipients by remember {
-        mutableStateOf<List<ComposeRecipient>>(
-            when {
-                draft != null -> draft.cc.mapNotNull { raw ->
-                    val (n, e) = parseFormattedRecipient(raw)
-                    if (e.isNotBlank()) makeRecipient(n, e) else null
-                }
-                replyTo != null && replyAll && !isForward ->
-                    replyTo.cc
-                        .map { parseFormattedRecipient(it) }
-                        .filter { it.second.isNotBlank() && !it.second.equals(currentUserEmail, true) }
-                        .distinctBy { it.second.lowercase() }
-                        .map { (n, e) -> makeRecipient(n, e) }
-                else -> emptyList()
-            }
-        )
+        mutableStateOf(initialRecipients.cc.map { (n, e) -> makeRecipient(n, e) })
     }
 
     var bccRecipients by remember {
-        mutableStateOf<List<ComposeRecipient>>(
-            draft?.bcc.orEmpty().mapNotNull { raw ->
-                val (n, e) = parseFormattedRecipient(raw)
-                if (e.isNotBlank()) makeRecipient(n, e) else null
-            }
-        )
+        mutableStateOf(initialRecipients.bcc.map { (n, e) -> makeRecipient(n, e) })
     }
 
     var showCc by rememberSaveable { mutableStateOf(ccRecipients.isNotEmpty()) }
