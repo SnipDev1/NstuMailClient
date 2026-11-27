@@ -312,16 +312,19 @@ fun MailListScreen(
                     ) {
                         val userEmail = state.credentials?.email.orEmpty()
                         val userKey = userEmail.trim().lowercase()
+                        val userProfile = personProfiles[userKey]
+                        val effectiveUserEmail = userProfile?.email?.takeIf { '@' in it } ?: userEmail
+                        val effectiveUserKey = effectiveUserEmail.trim().lowercase()
                         val userDisplayName = resolveDisplayName(
                             name = "",
-                            email = userEmail,
-                            profile = personProfiles[userKey],
+                            email = effectiveUserEmail,
+                            profile = userProfile,
                             knownNames = knownNames
                         )
                         UserAvatar(
                             name = userDisplayName,
-                            email = userEmail,
-                            photo = avatars[userKey],
+                            email = effectiveUserEmail,
+                            photo = avatars[effectiveUserKey] ?: avatars[userKey],
                             size = 46.dp,
                             onRequestLoad = onRequestAvatar
                         )

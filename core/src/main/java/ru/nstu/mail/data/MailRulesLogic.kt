@@ -416,3 +416,56 @@ fun applyFolderUnreadDeltas(
 /** Returns true when a batch read toggle should mark selected items as read. */
 fun shouldBatchMarkAsRead(messages: List<EmailSummary>, selectedIds: Set<String>): Boolean =
     messages.any { it.id in selectedIds && !it.isRead }
+
+fun ownSenderFolderIds(folders: List<MailFolder>, currentFolder: MailFolder? = null): Set<String> {
+    val ids = folders.filter {
+        it.systemKind == SystemFolderKind.SENT ||
+            it.systemKind == SystemFolderKind.OUTBOX ||
+            it.systemKind == SystemFolderKind.DRAFTS
+    }.mapTo(mutableSetOf()) { it.id }
+    if (currentFolder != null && (
+            currentFolder.systemKind == SystemFolderKind.SENT ||
+                currentFolder.systemKind == SystemFolderKind.OUTBOX ||
+                currentFolder.systemKind == SystemFolderKind.DRAFTS
+            )
+    ) {
+        ids += currentFolder.id
+    }
+    return ids
+}
+
+fun normalizeOwnSenderSummary(
+    item: EmailSummary,
+    ownFolderIds: Set<String>,
+    selfEmail: String,
+    selfName: String = "",
+    fallbackInOwnFolder: Boolean = false
+): EmailSummary {
+    val cleanEmail = selfEmail.trim()
+    if ('@' !in cleanEmail || '@' in item.senderEmail) return item
+    if (!fallbackInOwnFolder && item.parentFolderId !in ownFolderIds) return item
+    val cleanName = selfName.trim().ifBlank { cleanEmail }
+    val nextName = if (item.senderName.isBlank() || item.senderName == "Неизвестный") cleanName else item.senderName
+    return item.copy(senderEmail = cleanEmail, senderName = nextName)
+}
+
+fun normalizeOwnSenderDetail(
+    detail: EmailDetail,
+    ownFolderIds: Set<String>,
+    selfEmail: String,
+    selfName: String = "",
+    fallbackInOwnFolder: Boolean = false
+): EmailDetail {
+    val cleanEmail = selfEmail.trim()
+    if ('@' !in cleanEmail || '@' in detail.fromEmail) return detail
+    if (!fallbackInOwnFolder && detail.parentFolderId !in ownFolderIds) return detail
+    val cleanName = selfName.trim().ifBlank { cleanEmail }
+    val nextName = detail.from.ifBlank { cleanName }
+    return detail.copy(fromEmail = cleanEmail, from = nextName)
+}
+
+fun profileSmtpKeys(queryEmail: String, profile: PersonProfile?): List<String> =
+    (listOf(queryEmail, profile?.email.orEmpty()) + profile?.aliases.orEmpty())
+        .map { it.trim().lowercase() }
+        .filter { '@' in it }
+        .distinct()

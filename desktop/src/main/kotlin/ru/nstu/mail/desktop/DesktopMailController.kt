@@ -45,8 +45,12 @@ import ru.nstu.mail.data.extractAllTagHierarchiesForMatching
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.needsNameResolution
+import ru.nstu.mail.data.normalizeOwnSenderDetail
+import ru.nstu.mail.data.normalizeOwnSenderSummary
+import ru.nstu.mail.data.ownSenderFolderIds
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.profileSmtpKeys
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeFilename
 import ru.nstu.mail.data.shouldNotifyForMessage
@@ -643,12 +647,18 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
                     _state.value.copy(folders = folders, currentFolder = updatedCurrent)
                 ).ifEmpty { listOfNotNull(updatedCurrent?.id) }
 
-                val (items, includesLast) = c.listMessages(
+                val (rawItems, includesLast) = c.listMessages(
                     folderIds = effectiveIds,
                     offset = offset,
                     pageSize = PAGE_SIZE,
                     query = query,
                     filter = filter
+                )
+                val items = normalizeSummariesForOwnFolders(
+                    items = rawItems,
+                    folders = folders,
+                    current = updatedCurrent,
+                    isSearchAllFolders = query.isNotBlank() && _state.value.searchAllFolders
                 )
                 nextPageOffset = offset + PAGE_SIZE
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
@@ -1058,6 +1068,17 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             _state.update { it.copy(isLoading = true, errorMessage = null) }
             try {
                 var detail = c.getMessage(summary.id)
+                val ownIds = ownFolderSet()
+                val (selfEmail, selfName) = resolvedSelfIdentity()
+                val stCur = _state.value
+                detail = normalizeOwnSenderDetail(
+                    detail = detail,
+                    ownFolderIds = ownIds,
+                    selfEmail = selfEmail,
+                    selfName = selfName,
+                    fallbackInOwnFolder = !(stCur.searchQuery.isNotBlank() && stCur.searchAllFolders) &&
+                        stCur.currentFolder?.id in ownIds
+                )
                 val markedRead = !detail.isRead && !detail.isDraft
                 if (markedRead) {
                     runCatching { c.setRead(listOf(detail.id to detail.changeKey), true) }
@@ -1784,6 +1805,50 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         }
     }
 
+    private fun resolvedSelfIdentity(): Pair<String, String> {
+        val credsEmail = _state.value.credentials?.email.orEmpty().trim()
+        val selfProfile = _personProfiles.value[credsEmail.lowercase()]
+        val effectiveEmail = selfProfile?.email?.takeIf { '@' in it }
+            ?: credsEmail.takeIf { '@' in it }.orEmpty()
+        return effectiveEmail to selfProfile?.displayName.orEmpty()
+    }
+
+    private fun ownFolderSet(
+        folders: List<MailFolder> = _state.value.folders,
+        current: MailFolder? = _state.value.currentFolder
+    ): Set<String> = ownSenderFolderIds(folders, current)
+
+    private fun normalizeSummariesForOwnFolders(
+        items: List<EmailSummary>,
+        folders: List<MailFolder>,
+        current: MailFolder?,
+        isSearchAllFolders: Boolean
+    ): List<EmailSummary> {
+        val ownIds = ownFolderSet(folders, current)
+        val (selfEmail, selfName) = resolvedSelfIdentity()
+        val fallbackInOwnFolder = !isSearchAllFolders && current?.id in ownIds
+        return items.map {
+            normalizeOwnSenderSummary(
+                item = it,
+                ownFolderIds = ownIds,
+                selfEmail = selfEmail,
+                selfName = selfName,
+                fallbackInOwnFolder = fallbackInOwnFolder
+            )
+        }
+    }
+
+    private fun relatedSmtpKeysFor(key: String): List<String> {
+        val keys = linkedSetOf(key)
+        for ((mapKey, profile) in _personProfiles.value) {
+            val profileKeys = profileSmtpKeys(mapKey, profile)
+            if (mapKey == key || key in profileKeys) {
+                keys += profileKeys
+            }
+        }
+        return keys.filter { '@' in it }.distinct()
+    }
+
     fun requestAvatar(email: String) {
         val key = email.trim().lowercase()
         if ('@' !in key) return
@@ -1791,11 +1856,22 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
         if (!requestedAvatars.add(key)) return
         scope.launch {
             val bmp = avatarSemaphore.withPermit {
-                runCatching { c.getUserPhoto(key) }.getOrNull()?.let { bytes ->
-                    runCatching { Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
+                val candidates = (listOf(key) + relatedSmtpKeysFor(key)).distinct()
+                var bytes: ByteArray? = null
+                for (candidate in candidates) {
+                    bytes = runCatching { c.getUserPhoto(candidate) }.getOrNull()
+                    if (bytes != null) break
+                }
+                bytes?.let { raw ->
+                    runCatching { Image.makeFromEncoded(raw).toComposeImageBitmap() }.getOrNull()
                 }
             }
-            _avatars.update { it + (key to bmp) }
+            if (bmp != null) {
+                val targetKeys = (listOf(key) + relatedSmtpKeysFor(key)).distinct()
+                _avatars.update { cur -> cur + targetKeys.associateWith { bmp } }
+            } else {
+                _avatars.update { it + (key to null) }
+            }
         }
     }
 
@@ -1817,6 +1893,47 @@ class DesktopMailController(configDir: File = DesktopConfigPaths.defaultConfigDi
             }
             _personProfiles.update { it + (key to profile) }
             _loadingProfiles.update { it - key }
+
+            if (profile != null) {
+                val keys = profileSmtpKeys(email, profile)
+                val existingBmp = keys.firstNotNullOfOrNull { _avatars.value[it] }
+                if (existingBmp != null) {
+                    _avatars.update { cur -> cur + keys.associateWith { existingBmp } }
+                } else {
+                    val selfKey = _state.value.credentials?.email?.trim()?.lowercase().orEmpty()
+                    if (key == selfKey || keys.any { it in requestedAvatars }) {
+                        keys.firstOrNull { it !in requestedAvatars }?.let(::requestAvatar)
+                    }
+                }
+                val selfKey = _state.value.credentials?.email?.trim()?.lowercase().orEmpty()
+                if (key == selfKey && '@' in profile.email) {
+                    _state.update { st ->
+                        val ownIds = ownFolderSet(st.folders, st.currentFolder)
+                        val fallbackInOwn = !(st.searchQuery.isNotBlank() && st.searchAllFolders) &&
+                            st.currentFolder?.id in ownIds
+                        st.copy(
+                            messages = st.messages.map {
+                                normalizeOwnSenderSummary(
+                                    item = it,
+                                    ownFolderIds = ownIds,
+                                    selfEmail = profile.email,
+                                    selfName = profile.displayName,
+                                    fallbackInOwnFolder = fallbackInOwn
+                                )
+                            },
+                            selectedMessage = st.selectedMessage?.let { sel ->
+                                normalizeOwnSenderDetail(
+                                    detail = sel,
+                                    ownFolderIds = ownIds,
+                                    selfEmail = profile.email,
+                                    selfName = profile.displayName,
+                                    fallbackInOwnFolder = fallbackInOwn
+                                )
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
 

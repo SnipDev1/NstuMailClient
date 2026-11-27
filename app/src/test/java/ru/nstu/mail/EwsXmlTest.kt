@@ -15,12 +15,17 @@ import ru.nstu.mail.data.EwsClient
 import ru.nstu.mail.data.EwsException
 import ru.nstu.mail.data.EwsXml
 import ru.nstu.mail.data.MailFilter
+import ru.nstu.mail.data.MailFolder
 import ru.nstu.mail.data.OutgoingAttachment
 import ru.nstu.mail.data.ParticipantRole
 import ru.nstu.mail.data.PersonProfile
 import ru.nstu.mail.data.SystemFolderKind
 import ru.nstu.mail.data.TagSortRule
 import ru.nstu.mail.data.adjustFolderUnreadDelta
+import ru.nstu.mail.data.normalizeOwnSenderDetail
+import ru.nstu.mail.data.normalizeOwnSenderSummary
+import ru.nstu.mail.data.ownSenderFolderIds
+import ru.nstu.mail.data.profileSmtpKeys
 import ru.nstu.mail.data.applyUniqueSubtreeCounts
 import ru.nstu.mail.data.buildAutoSortFromFolderTree
 import ru.nstu.mail.data.childTagsForPrefix
@@ -1443,5 +1448,141 @@ class EwsXmlTest {
             linkHex = "#5CDAA5"
         )
         assertFalse(darkTransparent.contains("rgba(0, 0, 0, 0)"))
+    }
+
+    @Test
+    fun `Sent items request message Sender, extract SMTP fallback, and normalize own sender identities`() {
+        val findReq = EwsXml.buildFindItemsRequest(listOf("f-sent"), 0, 25)
+        assertTrue(findReq.contains("""FieldURI="message:Sender""""))
+        val getItemReq = EwsXml.buildGetItemRequest("sent-1")
+        assertTrue(getItemReq.contains("""FieldURI="message:Sender""""))
+
+        val findXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                    xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:FindItemResponseMessage ResponseClass="Success">
+                      <m:RootFolder IncludesLastItemInRange="true">
+                        <t:Items>
+                          <t:Message>
+                            <t:ItemId Id="sent-1" ChangeKey="ck-1"/>
+                            <t:Subject>Отправленное 1</t:Subject>
+                            <t:DateTimeReceived>2026-11-27T03:00:00Z</t:DateTimeReceived>
+                            <t:From>
+                              <t:Mailbox>
+                                <t:Name>Иванов Иван</t:Name>
+                                <t:EmailAddress>/O=NSTU/OU=EXCHANGE/CN=IVANOV</t:EmailAddress>
+                              </t:Mailbox>
+                            </t:From>
+                            <t:Sender>
+                              <t:Mailbox>
+                                <t:Name>Иванов Иван</t:Name>
+                                <t:EmailAddress>ivanov@corp.nstu.ru</t:EmailAddress>
+                              </t:Mailbox>
+                            </t:Sender>
+                            <t:IsRead>true</t:IsRead>
+                          </t:Message>
+                          <t:Message>
+                            <t:ItemId Id="sent-2" ChangeKey="ck-2"/>
+                            <t:Subject>Отправленное без адреса</t:Subject>
+                            <t:DateTimeReceived>2026-11-27T03:01:00Z</t:DateTimeReceived>
+                            <t:From>
+                              <t:Mailbox>
+                                <t:Name>/O=NSTU/CN=NOEMAIL</t:Name>
+                                <t:EmailAddress>/O=NSTU/CN=NOEMAIL</t:EmailAddress>
+                              </t:Mailbox>
+                            </t:From>
+                            <t:IsRead>true</t:IsRead>
+                          </t:Message>
+                        </t:Items>
+                      </m:RootFolder>
+                    </m:FindItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:FindItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        val (items, _) = EwsXml.parseFindItemsResponse(findXml)
+        assertEquals(2, items.size)
+        assertEquals("ivanov@corp.nstu.ru", items[0].senderEmail)
+        assertEquals("", items[1].senderEmail)
+
+        val getXml = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+                                   xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+                  <m:ResponseMessages>
+                    <m:GetItemResponseMessage ResponseClass="Success">
+                      <m:Items>
+                        <t:Message>
+                          <t:ItemId Id="sent-1" ChangeKey="ck-1"/>
+                          <t:Subject>Отправленное 1</t:Subject>
+                          <t:Body BodyType="Text">Привет</t:Body>
+                          <t:Sender>
+                            <t:Mailbox>
+                              <t:Name>Иванов Иван</t:Name>
+                              <t:EmailAddress>ivanov@corp.nstu.ru</t:EmailAddress>
+                            </t:Mailbox>
+                          </t:Sender>
+                          <t:IsRead>true</t:IsRead>
+                        </t:Message>
+                      </m:Items>
+                    </m:GetItemResponseMessage>
+                  </m:ResponseMessages>
+                </m:GetItemResponse>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        val detailFromSender = EwsXml.parseGetItemResponse(getXml)
+        assertEquals("ivanov@corp.nstu.ru", detailFromSender.fromEmail)
+        assertEquals("Иванов Иван", detailFromSender.from)
+
+        val folders = listOf(
+            MailFolder("f-inbox", "", "", "Входящие", 10, 1, systemKind = SystemFolderKind.INBOX),
+            MailFolder("f-sent", "", "", "Отправленные", 5, 0, systemKind = SystemFolderKind.SENT),
+            MailFolder("f-drafts", "", "", "Черновики", 2, 0, systemKind = SystemFolderKind.DRAFTS)
+        )
+        val ownIds = ownSenderFolderIds(folders)
+        assertEquals(setOf("f-sent", "f-drafts"), ownIds)
+
+        val normalizedSent = normalizeOwnSenderSummary(
+            item = items[1].copy(parentFolderId = "f-sent", senderName = "Неизвестный"),
+            ownFolderIds = ownIds,
+            selfEmail = "ivanov@stud.nstu.ru",
+            selfName = "Иванов И."
+        )
+        assertEquals("ivanov@stud.nstu.ru", normalizedSent.senderEmail)
+        assertEquals("Иванов И.", normalizedSent.senderName)
+
+        val untouchedInbox = normalizeOwnSenderSummary(
+            item = items[1].copy(parentFolderId = "f-inbox"),
+            ownFolderIds = ownIds,
+            selfEmail = "ivanov@stud.nstu.ru",
+            selfName = "Иванов И."
+        )
+        assertEquals("", untouchedInbox.senderEmail)
+
+        val normalizedDetail = normalizeOwnSenderDetail(
+            detail = EmailDetail("sent-2", "ck-2", "Тема", "", "", listOf("to@nstu.ru"), emptyList(), emptyList(), "", "hi", false, true, attachments = emptyList(), parentFolderId = "f-sent"),
+            ownFolderIds = ownIds,
+            selfEmail = "ivanov@stud.nstu.ru",
+            selfName = "Иванов И."
+        )
+        assertEquals("ivanov@stud.nstu.ru", normalizedDetail.fromEmail)
+        assertEquals("Иванов И.", normalizedDetail.from)
+
+        val keys = profileSmtpKeys(
+            queryEmail = "Login@stud.nstu.ru",
+            profile = PersonProfile(
+                displayName = "Иванов И.",
+                email = "primary@corp.nstu.ru",
+                aliases = listOf("alias@nstu.ru", "LOGIN@stud.nstu.ru", "invalid")
+            )
+        )
+        assertEquals(listOf("login@stud.nstu.ru", "primary@corp.nstu.ru", "alias@nstu.ru"), keys)
     }
 }

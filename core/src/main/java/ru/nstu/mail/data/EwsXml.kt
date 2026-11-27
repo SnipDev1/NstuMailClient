@@ -372,6 +372,7 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="item:ParentFolderId"/>
                   <t:FieldURI FieldURI="message:From"/>
+                  <t:FieldURI FieldURI="message:Sender"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
                   <t:FieldURI FieldURI="message:InternetMessageId"/>
                   <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
@@ -409,6 +410,7 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:Flag"/>
                   <t:FieldURI FieldURI="item:ParentFolderId"/>
                   <t:FieldURI FieldURI="message:From"/>
+                  <t:FieldURI FieldURI="message:Sender"/>
                   <t:FieldURI FieldURI="message:IsRead"/>
                   <t:FieldURI FieldURI="message:InternetMessageId"/>
                   <t:ExtendedFieldURI PropertyTag="0x5D01" PropertyType="String"/>
@@ -454,6 +456,7 @@ object EwsXml {
                   <t:FieldURI FieldURI="item:IsDraft"/>
                   <t:FieldURI FieldURI="item:ParentFolderId"/>
                   <t:FieldURI FieldURI="message:From"/>
+                  <t:FieldURI FieldURI="message:Sender"/>
                   <t:FieldURI FieldURI="message:ToRecipients"/>
                   <t:FieldURI FieldURI="message:CcRecipients"/>
                   <t:FieldURI FieldURI="message:BccRecipients"/>
@@ -1192,14 +1195,7 @@ object EwsXml {
             .orEmpty()
             .ifBlank { fallbackParentFolderId }
 
-        val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
-            ?.firstChildElement(EWS_TYPES, "Mailbox")
-        val senderName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
-        var senderEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
-        if ('@' !in senderEmail) {
-            val fallback = extractSmtpFallback(msg)
-            if (fallback.isNotEmpty()) senderEmail = fallback
-        }
+        val (senderName, senderEmail) = extractSenderMailbox(msg)
 
         return EmailSummary(
             id = id,
@@ -1252,14 +1248,7 @@ object EwsXml {
             ?.firstChildText(EWS_TYPES, "FlagStatus").orEmpty()
         val isFlagged = flagStatus.equals("Flagged", ignoreCase = true)
 
-        val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
-            ?.firstChildElement(EWS_TYPES, "Mailbox")
-        val fromName = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
-        var fromEmail = fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty()
-        if ('@' !in fromEmail) {
-            val fallback = extractSmtpFallback(msg)
-            if (fallback.isNotEmpty()) fromEmail = fallback
-        }
+        val (fromName, fromEmail) = extractSenderMailbox(msg)
         val parentFolderId = msg.firstChildElement(EWS_TYPES, "ParentFolderId")
             ?.getAttribute("Id")
             ?.trim()
@@ -1319,6 +1308,22 @@ object EwsXml {
             attachments = attachments,
             parentFolderId = parentFolderId
         )
+    }
+
+    private fun extractSenderMailbox(msg: Element): Pair<String, String> {
+        val fromMailbox = msg.firstChildElement(EWS_TYPES, "From")
+            ?.firstChildElement(EWS_TYPES, "Mailbox")
+        val senderMailbox = msg.firstChildElement(EWS_TYPES, "Sender")
+            ?.firstChildElement(EWS_TYPES, "Mailbox")
+        val name = fromMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty()
+            .ifBlank { senderMailbox?.firstChildText(EWS_TYPES, "Name").orEmpty() }
+        val candidates = listOf(
+            fromMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty(),
+            senderMailbox?.firstChildText(EWS_TYPES, "EmailAddress").orEmpty(),
+            extractSmtpFallback(msg)
+        )
+        val email = candidates.firstOrNull { '@' in it }.orEmpty()
+        return name to email
     }
 
     private fun extractSmtpFallback(msg: Element): String {

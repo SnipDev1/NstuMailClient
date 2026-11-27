@@ -64,8 +64,12 @@ import ru.nstu.mail.data.formatMailDate
 import ru.nstu.mail.data.formatTagPath
 import ru.nstu.mail.data.matchAllAutoSortRules
 import ru.nstu.mail.data.needsNameResolution
+import ru.nstu.mail.data.normalizeOwnSenderDetail
+import ru.nstu.mail.data.normalizeOwnSenderSummary
+import ru.nstu.mail.data.ownSenderFolderIds
 import ru.nstu.mail.data.parseFormattedRecipient
 import ru.nstu.mail.data.parseTagPath
+import ru.nstu.mail.data.profileSmtpKeys
 import ru.nstu.mail.data.resolveDisplayName
 import ru.nstu.mail.data.sanitizeFilename
 import ru.nstu.mail.data.splitEmails
@@ -831,12 +835,18 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     _state.value.copy(folders = folders, currentFolder = updatedCurrent)
                 ).ifEmpty { listOfNotNull(updatedCurrent?.id) }
 
-                val (items, includesLast) = c.listMessages(
+                val (rawItems, includesLast) = c.listMessages(
                     folderIds = effectiveIds,
                     offset = offset,
                     pageSize = PAGE_SIZE,
                     query = query,
                     filter = filter
+                )
+                val items = normalizeSummariesForOwnFolders(
+                    items = rawItems,
+                    folders = folders,
+                    current = updatedCurrent,
+                    isSearchAllFolders = query.isNotBlank() && _state.value.searchAllFolders
                 )
                 nextPageOffset = offset + PAGE_SIZE
                 rememberKnownNames(items.map { it.senderEmail to it.senderName })
@@ -1458,6 +1468,17 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(isLoading = true, errorMessage = null) }
             try {
                 var detail = c.getMessage(itemId)
+                val ownIds = ownFolderSet()
+                val (selfEmail, selfName) = resolvedSelfIdentity()
+                val stCur = _state.value
+                detail = normalizeOwnSenderDetail(
+                    detail = detail,
+                    ownFolderIds = ownIds,
+                    selfEmail = selfEmail,
+                    selfName = selfName,
+                    fallbackInOwnFolder = !(stCur.searchQuery.isNotBlank() && stCur.searchAllFolders) &&
+                        stCur.currentFolder?.id in ownIds
+                )
                 val markedRead = !detail.isRead && !detail.isDraft
                 if (markedRead) {
                     runCatching { c.setRead(listOf(detail.id to detail.changeKey), true) }
@@ -2035,6 +2056,50 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun resolvedSelfIdentity(): Pair<String, String> {
+        val credsEmail = _state.value.credentials?.email.orEmpty().trim()
+        val selfProfile = _personProfiles.value[credsEmail.lowercase()]
+        val effectiveEmail = selfProfile?.email?.takeIf { '@' in it }
+            ?: credsEmail.takeIf { '@' in it }.orEmpty()
+        return effectiveEmail to selfProfile?.displayName.orEmpty()
+    }
+
+    private fun ownFolderSet(
+        folders: List<MailFolder> = _state.value.folders,
+        current: MailFolder? = _state.value.currentFolder
+    ): Set<String> = ownSenderFolderIds(folders, current)
+
+    private fun normalizeSummariesForOwnFolders(
+        items: List<EmailSummary>,
+        folders: List<MailFolder>,
+        current: MailFolder?,
+        isSearchAllFolders: Boolean
+    ): List<EmailSummary> {
+        val ownIds = ownFolderSet(folders, current)
+        val (selfEmail, selfName) = resolvedSelfIdentity()
+        val fallbackInOwnFolder = !isSearchAllFolders && current?.id in ownIds
+        return items.map {
+            normalizeOwnSenderSummary(
+                item = it,
+                ownFolderIds = ownIds,
+                selfEmail = selfEmail,
+                selfName = selfName,
+                fallbackInOwnFolder = fallbackInOwnFolder
+            )
+        }
+    }
+
+    private fun relatedSmtpKeysFor(key: String): List<String> {
+        val keys = linkedSetOf(key)
+        for ((mapKey, profile) in _personProfiles.value) {
+            val profileKeys = profileSmtpKeys(mapKey, profile)
+            if (mapKey == key || key in profileKeys) {
+                keys += profileKeys
+            }
+        }
+        return keys.filter { '@' in it }.distinct()
+    }
+
     fun requestAvatar(email: String) {
         val key = email.trim().lowercase()
         if ('@' !in key) return
@@ -2043,7 +2108,12 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             val bitmap = avatarSemaphore.withPermit {
-                val bytes = runCatching { c.getUserPhoto(key) }.getOrNull()
+                val candidates = (listOf(key) + relatedSmtpKeysFor(key)).distinct()
+                var bytes: ByteArray? = null
+                for (candidate in candidates) {
+                    bytes = runCatching { c.getUserPhoto(candidate) }.getOrNull()
+                    if (bytes != null) break
+                }
                 if (bytes != null) {
                     withContext(Dispatchers.Default) {
                         runCatching {
@@ -2054,7 +2124,14 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
                     null
                 }
             }
-            _avatars.update { it + (key to bitmap) }
+            if (bitmap != null) {
+                val targetKeys = (listOf(key) + relatedSmtpKeysFor(key)).distinct()
+                _avatars.update { cur ->
+                    cur + targetKeys.associateWith { bitmap }
+                }
+            } else {
+                _avatars.update { it + (key to null) }
+            }
         }
     }
 
@@ -2077,6 +2154,47 @@ class MailViewModel(application: Application) : AndroidViewModel(application) {
             }
             _personProfiles.update { it + (key to profile) }
             _loadingProfiles.update { it - key }
+
+            if (profile != null) {
+                val keys = profileSmtpKeys(email, profile)
+                val existingBmp = keys.firstNotNullOfOrNull { _avatars.value[it] }
+                if (existingBmp != null) {
+                    _avatars.update { cur -> cur + keys.associateWith { existingBmp } }
+                } else {
+                    val selfKey = _state.value.credentials?.email?.trim()?.lowercase().orEmpty()
+                    if (key == selfKey || keys.any { it in requestedAvatars }) {
+                        keys.firstOrNull { it !in requestedAvatars }?.let(::requestAvatar)
+                    }
+                }
+                val selfKey = _state.value.credentials?.email?.trim()?.lowercase().orEmpty()
+                if (key == selfKey && '@' in profile.email) {
+                    _state.update { st ->
+                        val ownIds = ownFolderSet(st.folders, st.currentFolder)
+                        val fallbackInOwn = !(st.searchQuery.isNotBlank() && st.searchAllFolders) &&
+                            st.currentFolder?.id in ownIds
+                        st.copy(
+                            messages = st.messages.map {
+                                normalizeOwnSenderSummary(
+                                    item = it,
+                                    ownFolderIds = ownIds,
+                                    selfEmail = profile.email,
+                                    selfName = profile.displayName,
+                                    fallbackInOwnFolder = fallbackInOwn
+                                )
+                            },
+                            selectedMessage = st.selectedMessage?.let { sel ->
+                                normalizeOwnSenderDetail(
+                                    detail = sel,
+                                    ownFolderIds = ownIds,
+                                    selfEmail = profile.email,
+                                    selfName = profile.displayName,
+                                    fallbackInOwnFolder = fallbackInOwn
+                                )
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
 

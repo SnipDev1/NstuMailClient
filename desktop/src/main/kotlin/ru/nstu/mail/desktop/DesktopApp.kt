@@ -520,20 +520,23 @@ private fun DesktopWorkspace(
                 ) {
                     val userEmail = state.credentials?.email.orEmpty()
                     val userKey = userEmail.trim().lowercase()
-                    val userName = resolveDisplayName("", userEmail, profiles[userKey], knownNames)
+                    val userProfile = profiles[userKey]
+                    val effectiveUserEmail = userProfile?.email?.takeIf { '@' in it } ?: userEmail
+                    val effectiveUserKey = effectiveUserEmail.trim().lowercase()
+                    val userName = resolveDisplayName("", effectiveUserEmail, userProfile, knownNames)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
-                                if (userEmail.isNotBlank()) {
-                                    selectedPerson = EmailParticipant(userName, userEmail, ParticipantRole.FROM)
+                                if (effectiveUserEmail.isNotBlank()) {
+                                    selectedPerson = EmailParticipant(userName, effectiveUserEmail, ParticipantRole.FROM)
                                 }
                             }
                             .padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        DesktopAvatar(userName, userEmail, avatars[userKey], 40.dp, controller::requestAvatar)
+                        DesktopAvatar(userName, effectiveUserEmail, avatars[effectiveUserKey] ?: avatars[userKey], 40.dp, controller::requestAvatar)
                         Spacer(Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Почта НГТУ", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
